@@ -5019,7 +5019,77 @@ assert.ok(
 	"非运行子代理卡冻结统计并隐藏进度行（R-01-009/AC-15）",
 );
 
+// ---- R-01-026 宿主侧栏角标与弹窗的数据通路（不依赖前台窗格打开）----
+// 缺陷回归（东家 2026-10-14）：右栏「活动会话」tab 被关闭后，render() 在 ensurePane()
+// 返回 null 时整轮早退，角标计数与弹窗明细冻结。契约层锚定解耦形态与口径单点。
+// R-01-026/AC-03：活动模型派生段必须是不读写窗格 DOM 的独立函数，且位于 render() 之前——
+// 只有这样它才能在窗格不可得时照常执行。
+assert.ok(
+	clientSource.includes("function deriveActiveModel() {") &&
+		clientSource.indexOf("function deriveActiveModel() {") < clientSource.indexOf("function render() {"),
+	"活动模型派生段抽为窗格无关的 deriveActiveModel 并置于 render 之前（R-01-026/AC-03）",
+);
+const deriveBody = clientSource.slice(
+	clientSource.indexOf("function deriveActiveModel() {"),
+	clientSource.indexOf("function render() {"),
+);
+assert.ok(
+	!/(^|[^A-Za-z0-9_$])pane([^A-Za-z0-9_$]|$)/.test(deriveBody),
+	"派生段内不出现窗格标识符：角标与弹窗的数据通路不经任何窗格 DOM 读写（R-01-026/AC-03）",
+);
+// R-01-026/AC-03、AC-04：render() 在取得窗格之前完成派生，并在窗格不可得时分流收口角标刷新。
+assert.ok(
+	clientSource.includes("} = deriveActiveModel();") &&
+		clientSource.includes("if (pane === null) {") &&
+		clientSource.indexOf("if (pane === null) {", clientSource.indexOf("function render() {")) > clientSource.indexOf("} = deriveActiveModel();"),
+	"render 先派生活动模型再判定窗格可得性（R-01-026/AC-03、AC-04）",
+);
+const renderStart = clientSource.indexOf("function render() {");
+const paneMissAt = clientSource.indexOf("if (pane === null) {", renderStart);
+// 切片边界取到该分支之后的 applyLayout 调用：区间内必须刷新角标且不得出现任何窗格 DOM 读写，
+// 避免用固定长度近似把注释或后续代码误当作分支体。
+const paneMissBody = clientSource.slice(clientSource.indexOf("} = deriveActiveModel();", renderStart), clientSource.indexOf("applyLayout();", paneMissAt));
+assert.ok(
+	paneMissBody.includes("} = deriveActiveModel();") &&
+		paneMissBody.includes("syncBadgeSurface(active, done);") &&
+		paneMissBody.includes("renderBadgeModal();") &&
+		paneMissBody.includes("return;") &&
+		!/pane\./.test(paneMissBody),
+	"窗格不可得（右侧栏 tab 关闭、宿主布局缺失、hero 无会话座）分支只刷新角标与弹窗、不触窗格 DOM（R-01-026/AC-03、AC-04）",
+);
+// R-01-026/AC-03：角标刷新另起一路去重键，且三处调用点（两处窗格缺席收口 + 一处在屏路径）
+// 全部位于窗格渲染签名去重之前——窗格签名不推进（面板关闭或渲染未变）时角标不得停摆。
+const sigGateIndex = clientSource.indexOf("if (sig === lastSig && optionSig === lastOptionSig) return;");
+const badgeCallIndexes = [...clientSource.matchAll(/syncBadgeSurface\(active, done\);/g)].map((match) => match.index);
+assert.ok(
+	clientSource.includes('let lastBadgeSig = "";') &&
+		clientSource.includes("if (sig === lastBadgeSig) return;") &&
+		clientSource.includes("lastBadgeSig = sig;") &&
+		badgeCallIndexes.length === 3 &&
+		sigGateIndex > 0 &&
+		badgeCallIndexes.every((index) => index < sigGateIndex),
+	"角标用独立去重键 lastBadgeSig，三处调用点均在窗格渲染签名去重之前（R-01-026/AC-03）",
+);
+// R-01-026：三类计数与三组明细收口到 core 的 classifyActiveEntries 单点——一次归类同时
+// 产出条目与计数，渲染层不再 filter 重算同口径副本（statusBadges 复用同一函数）。
+assert.ok(
+	bundle.includes("function classifyActiveEntries(entries)") &&
+		bundle.includes("const groups = classifyActiveEntries(active);") &&
+		clientSource.includes("badgeEntries = { running: groups.running, interaction: groups.interaction, completed: groups.completed };") &&
+		!clientSource.includes("completed: doneList.length") &&
+		!clientSource.includes('active.filter((entry) => entry.kind === "running")'),
+	"三状态计数与明细取 core#classifyActiveEntries 单点口径，渲染层不自算副本（R-01-026/AC-01）",
+);
+// R-01-026：角标与窗格共用的活动数据派生面不得自带网络通道（PRD「不引入新的 HTTP 轮询」）。
+// 锚在派生段本身：窗格卸载后仍每轮执行的就是它，若在此新增请求即为新增轮询。
+assert.ok(
+	(deriveBody.match(/\bfetch\(/g) ?? []).length === 0 &&
+		!/\bnew EventSource|XMLHttpRequest/.test(deriveBody),
+	"活动数据派生面只消费既有的订阅快照，不建立新的 HTTP 轮询（R-01-026、R-02-004/AC-02）",
+);
+
 // ---- R-01-002/AC-10～AC-12 宿主侧完成确认契约（C-030）----
+
 // R-01-002/AC-12 刷新/重连恢复：状态由宿主侧持久化承载，不依赖客户端在线观测。
 const hostSource = await readFile(join(root, "src/host.mjs"), "utf8");
 const hostEntry = await readFile(join(root, ".dsh-plugin/index.mjs"), "utf8");

@@ -1333,20 +1333,28 @@ export function awaitBadgeStats(entries) {
  *  （待确认/待审查/待回复，不含完成提醒与错误提醒）；已完成 = kind 'awaiting'
  *  且 waitClass 'done'（回合结束且宿主持久态未被标记已读）。
  *  空/非法输入返回全 0，供「0 值仍常显并置灰」的角标呈现直接使用。 */
-export function statusBadges(entries) {
-	let running = 0;
-	let interaction = 0;
-	let completed = 0;
+/** 三状态角标的三组条目（计数与明细的唯一归类处）：按 statusBadges 同一口径把活动条目
+ *  分成运行中 / 需要交互 / 已完成三组，计数即各组长度——角标的计数与弹窗明细同源，
+ *  渲染层不再各自 filter 一遍（避免同口径出现第二份实现）。空/非法输入返回三组空数组。 */
+export function classifyActiveEntries(entries) {
+	const running = [];
+	const interaction = [];
+	const completed = [];
 	for (const entry of Array.isArray(entries) ? entries : []) {
 		if (entry?.kind === "running") {
-			running += 1;
+			running.push(entry);
 			continue;
 		}
 		if (entry?.kind !== "awaiting") continue;
-		if (entry.waitClass === "blocked") interaction += 1;
-		else if (entry.waitClass === "done") completed += 1;
+		if (entry.waitClass === "blocked") interaction.push(entry);
+		else if (entry.waitClass === "done") completed.push(entry);
 	}
 	return { running, interaction, completed };
+}
+
+export function statusBadges(entries) {
+	const groups = classifyActiveEntries(entries);
+	return { running: groups.running.length, interaction: groups.interaction.length, completed: groups.completed.length };
 }
 
 /** 「已完成」分区拆分：把完成提醒条目（kind 'awaiting' 且 waitClass 'done'）从活动条目

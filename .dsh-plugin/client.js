@@ -1339,20 +1339,28 @@ function awaitBadgeStats(entries) {
  *  （待确认/待审查/待回复，不含完成提醒与错误提醒）；已完成 = kind 'awaiting'
  *  且 waitClass 'done'（回合结束且宿主持久态未被标记已读）。
  *  空/非法输入返回全 0，供「0 值仍常显并置灰」的角标呈现直接使用。 */
-function statusBadges(entries) {
-	let running = 0;
-	let interaction = 0;
-	let completed = 0;
+/** 三状态角标的三组条目（计数与明细的唯一归类处）：按 statusBadges 同一口径把活动条目
+ *  分成运行中 / 需要交互 / 已完成三组，计数即各组长度——角标的计数与弹窗明细同源，
+ *  渲染层不再各自 filter 一遍（避免同口径出现第二份实现）。空/非法输入返回三组空数组。 */
+function classifyActiveEntries(entries) {
+	const running = [];
+	const interaction = [];
+	const completed = [];
 	for (const entry of Array.isArray(entries) ? entries : []) {
 		if (entry?.kind === "running") {
-			running += 1;
+			running.push(entry);
 			continue;
 		}
 		if (entry?.kind !== "awaiting") continue;
-		if (entry.waitClass === "blocked") interaction += 1;
-		else if (entry.waitClass === "done") completed += 1;
+		if (entry.waitClass === "blocked") interaction.push(entry);
+		else if (entry.waitClass === "done") completed.push(entry);
 	}
 	return { running, interaction, completed };
+}
+
+function statusBadges(entries) {
+	const groups = classifyActiveEntries(entries);
+	return { running: groups.running.length, interaction: groups.interaction.length, completed: groups.completed.length };
 }
 
 /** 「已完成」分区拆分：把完成提醒条目（kind 'awaiting' 且 waitClass 'done'）从活动条目
@@ -4815,6 +4823,8 @@ function apply(ctx) {
 	 *  计数。上一次计数只用于判定「新增」——强调动画只在计数增加的那一次播放。 */
 	let badgePanelDisposer = null;
 	let lastBadgeCounts = null;
+	/** 角标面去重键（计数三元组 + 三组明细 id）：另起一路，不与窗格渲染签名共用（R-01-026/AC-03）。 */
+	let lastBadgeSig = "";
 	/** 「已完成」分区未读游标（sessionId → 已读时的 lastTurnEnd，见 readDoneReadLedger）。 */
 	const doneReadById = readDoneReadLedger();
 	/** 本帧「已完成」分区条目索引（sessionId → entry）：点击已读时取当时的进入时刻，
@@ -5046,7 +5056,7 @@ function apply(ctx) {
 	}
 
 	// ---- 宿主侧栏三状态角标（新增功能）：glyph 组件读的模块级快照 ----
-	/** 三状态角标的最新计数（syncStatusBadges 每轮刷新）；glyph 组件据此渲染，
+	/** 三状态角标的最新计数（syncBadgeSurface 每轮刷新）；glyph 组件据此渲染，
 	 *  面板正文据此列出分组明细。初值全 0，对应「0 值仍常显并置灰」。 */
 	let badgeCounts = { running: 0, interaction: 0, completed: 0 };
 	/** 三状态角标明细：按状态分组的条目快照（面板正文列条目用）。 */
@@ -5070,19 +5080,26 @@ function apply(ctx) {
 		}
 	}
 
-	/** 三状态角标计数与明细刷新（每轮渲染调用）：统计口径为**主会话条目**——
-	 *  运行中 = kind running；需要交互 = 阻塞等待（待确认/待审查/待回复）；
-	 *  已完成 = 完成提醒（回合结束且未标记已读）。done 分区条目单独统计，
-	 *  不与活动区条目重复计数。计数变化即通知订阅者，并在计数增加时播一次强调动画。 */
-	function syncStatusBadges(activeEntries, doneList) {
-		const runningEntries = activeEntries.filter((entry) => entry.kind === "running");
-		const interactionEntries = activeEntries.filter((entry) => entry.kind === "awaiting" && entry.waitClass === "blocked");
-		const next = {
-			running: runningEntries.length,
-			interaction: interactionEntries.length,
-			completed: doneList.length,
-		};
-		badgeEntries = { running: runningEntries, interaction: interactionEntries, completed: [...doneList] };
+	/** 角标面刷新（窗格无关，R-01-026/AC-03、AC-04）：render() 在**取得窗格之前**调用，
+	 *  故右侧栏 tab 被用户关闭、宿主布局未就位、hero 无会话座时角标仍随会话状态推进。
+	 *  计数与明细口径取 src/core.mjs 的 classifyActiveEntries 单点（只统计主会话三类，与窗格数量徽标
+	 *  同源）；明细条目取自同一轮派生（deriveActiveModel），与窗格卡片一致。
+	 *  去重另起一路 lastBadgeSig（计数三元组 + 三组明细 id），不与窗格渲染签名共用——
+	 *  共用会让面板关闭期间角标停在旧计数。计数增加时按类播一次强调动画。
+	 *  @param activeEntries 本轮活动条目（含完成提醒，来自 deriveActiveModel 的 active）
+	 *  @param doneList 本轮已完成分区条目（呈现分批用；三类归类以活动条目为准） */
+	function syncBadgeSurface(activeEntries, doneList) {
+		const active = Array.isArray(activeEntries) ? activeEntries : [];
+		const done = Array.isArray(doneList) ? doneList : [];
+		// 口径单点（src/core.mjs#classifyActiveEntries）：一次归类同时给出三组条目与计数，
+		// 弹窗明细与角标计数同源；active 已含完成提醒条目（partitionDoneEntries 只是呈现
+		// 分批、不改变 active 内容），故已完成组即 done 分区同集合，不会重复计数。
+		const groups = classifyActiveEntries(active);
+		const next = { running: groups.running.length, interaction: groups.interaction.length, completed: groups.completed.length };
+		badgeEntries = { running: groups.running, interaction: groups.interaction, completed: groups.completed };
+		const sig = JSON.stringify([next, groups.running.map((entry) => entry.id), groups.interaction.map((entry) => entry.id), groups.completed.map((entry) => entry.id)]);
+		if (sig === lastBadgeSig) return;
+		lastBadgeSig = sig;
 		const prev = lastBadgeCounts;
 		// 「新增」= 计数相对上一帧增加（首次记账只建立基线，不播动画）。
 		// 「需要交互」新增单独识别：它要求用户立刻行动，走更高对比的强调变体
@@ -5092,13 +5109,8 @@ function apply(ctx) {
 		// 「需要交互」额外升级为 alert 变体，因为它是唯一要求用户立刻行动的一类。
 		const hit = prev !== null
 			&& (next.running > prev.running || next.interaction > prev.interaction || next.completed > prev.completed);
-		const changed = prev === null
-			|| next.running !== prev.running
-			|| next.interaction !== prev.interaction
-			|| next.completed !== prev.completed;
 		lastBadgeCounts = next;
 		badgeCounts = next;
-		if (!changed) return;
 		notifyBadgeCounts();
 		const glyph = document.querySelector(".dap-badge-glyph");
 		if (glyph === null) return;
@@ -8592,43 +8604,11 @@ function apply(ctx) {
 		console.error(`[dsh-activity-pane] 卡片渲染失败（${sessionId}）:`, error);
 	}
 
-	function render() {
-		installFrameObserver();
-		// 新增呈现配置每轮渲染前刷新一次：配置通道快照（若有）与 localStorage 记忆
-		// 合并成一份生效值，随后的停靠面切换与最近历史分支都读它。
-		refreshPaneOptions();
-		syncPaneDock();
-		// 右栏 tab 的打开时机（东家 2026-10-14 反馈「点 X 关闭后会自动重开」的修复）：
-		// 只在「本轮停靠面刚从 left 变成 right」时请求打开，绝不每轮重试——用户手动关掉
-		// tab 是明确的意图，插件再打开就是把面板重新推回去。首次装配（启动即右栏）由
-		// syncPaneDock 的初始转换触发；请求失败（尚无在屏会话）由下面这个有界重试兜。
-		if (paneDock === "right" && rightTabNeedsRequest) {
-			rightTabNeedsRequest = false;
-			requestRightTabWithRetry();
-		}
-		const pane = ensurePane();
-		if (pane === null) return;
-		if (pane !== renderedPane) {
-			renderedPane = pane;
-			lastSig = "";
-			pulseSignature = "";
-			prevRenderedActiveIds = new Set();
-			prevRenderedRecentIds = new Set();
-			recentVisibleCount = RECENT_PAGE_SIZE;
-			recentTotal = 0;
-			recentHasMore = false;
-			recentAppendQueued = false;
-			autoScrolledCurrentId = null;
-			autoScrolledCurrentCard = null;
-			// 旧窗格已脱离文档：其在飞平移的 transitionend 不再触发，逐元素取消避免残留。
-			for (const el of [...shiftCleanups.keys()]) cancelShift(el);
-		}
-		applyLayout();
-		const activeList = pane.querySelector(`.${LIST_CLASS}`);
-		const recentSection = pane.querySelector(`.${RECENT_CLASS}`);
-		const doneSection = pane.querySelector(`.${DONE_CLASS}`);
-		if (activeList === null || recentSection === null || doneSection === null) return;
-
+	/** 活动模型派生（窗格无关，R-01-026）：把宿主快照归一化为活动/已完成/最近三分区，
+	 *  并完成明细注入、订阅与回收记账。**不读写窗格 DOM**——角标与弹窗的计数与分组
+	 *  明细取自同一份结果，故窗格不可得（右侧栏 tab 被关闭、宿主布局缺失）时仍照常执行。
+	 *  返回值供窗格渲染段与角标面共用（R-01-026/AC-03、AC-04）。 */
+	function deriveActiveModel() {
 		if (e2eListReadyAt === 0 && e2eListDelayMs > 0) e2eListReadyAt = Date.now() + e2eListDelayMs;
 		let snapshot = getSnapshot(sessions, "list");
 		if (e2eListReadyAt > Date.now() && snapshot?.phase !== "error") {
@@ -8956,6 +8936,61 @@ function apply(ctx) {
 		}
 		// 重试链目标已成为当前会话（他途到达）即取消，避免过期链条拽回会话。
 		cancelStaleOpenRetries({ currentId, activatedId: lastActivatedId });
+		return { snapshot, listState, workspaceItems, active, activeRest, done, recent, now };
+	}
+
+	function render() {
+		installFrameObserver();
+		// 新增呈现配置每轮渲染前刷新一次：配置通道快照（若有）与 localStorage 记忆
+		// 合并成一份生效值，随后的停靠面切换与最近历史分支都读它。
+		refreshPaneOptions();
+		syncPaneDock();
+		// 右栏 tab 的打开时机（东家 2026-10-14 反馈「点 X 关闭后会自动重开」的修复）：
+		// 只在「本轮停靠面刚从 left 变成 right」时请求打开，绝不每轮重试——用户手动关掉
+		// tab 是明确的意图，插件再打开就是把面板重新推回去。首次装配（启动即右栏）由
+		// syncPaneDock 的初始转换触发；请求失败（尚无在屏会话）由下面这个有界重试兜。
+		if (paneDock === "right" && rightTabNeedsRequest) {
+			rightTabNeedsRequest = false;
+			requestRightTabWithRetry();
+		}
+		// ---- 活动模型派生（窗格无关的前段） ----
+		// 角标/弹窗与窗格卡片消费同一轮派生结果（R-01-026/AC-03、AC-04）：本段只读宿主
+		// 快照与模块级记账，不触碰窗格 DOM，故窗格不可得（右侧栏 tab 被关闭、宿主布局
+		// 缺失、hero 无会话座）时仍照常执行；窗格专属的 DOM 写入段在其后按 pane 分流。
+		const pane = ensurePane();
+		if (pane !== renderedPane) {
+			renderedPane = pane;
+			lastSig = "";
+			pulseSignature = "";
+			prevRenderedActiveIds = new Set();
+			prevRenderedRecentIds = new Set();
+			recentVisibleCount = RECENT_PAGE_SIZE;
+			recentTotal = 0;
+			recentHasMore = false;
+			recentAppendQueued = false;
+			autoScrolledCurrentId = null;
+			autoScrolledCurrentCard = null;
+			// 旧窗格已脱离文档：其在飞平移的 transitionend 不再触发，逐元素取消避免残留。
+			for (const el of [...shiftCleanups.keys()]) cancelShift(el);
+		}
+		const { snapshot, listState, workspaceItems, active, activeRest, done, recent, now } = deriveActiveModel();
+		if (pane === null) {
+			// 窗格无处挂载（右侧栏 tab 被用户关闭、宿主布局未就位、hero 无会话座）：角标与
+			// 弹窗仍随会话状态推进（R-01-026/AC-03、AC-04），此处不做任何窗格 DOM 写入。
+			syncBadgeSurface(active, done);
+			if (badgeModalOpen) renderBadgeModal();
+			return;
+		}
+		applyLayout();
+		const activeList = pane.querySelector(`.${LIST_CLASS}`);
+		const recentSection = pane.querySelector(`.${RECENT_CLASS}`);
+		const doneSection = pane.querySelector(`.${DONE_CLASS}`);
+		if (activeList === null || recentSection === null || doneSection === null) {
+			// 骨架未就位同样不得让角标停摆：与窗格缺席同一条收口路径（同样不写窗格 DOM）。
+			syncBadgeSurface(active, done);
+			if (badgeModalOpen) renderBadgeModal();
+			return;
+		}
 
 		// 三个分区的条目并集：卡片签名、工作区配色、可见集合与卸载回收共用同一口径；
 		// done 与 active 互斥（由 partitionDoneEntries 保证），不会重复计入。
@@ -8963,6 +8998,11 @@ function apply(ctx) {
 		const pulseSurface = desktopQuery.matches
 			? collapsed ? "rail" : "header"
 			: pane.getAttribute("data-open") === "true" ? "drawer" : "toggle";
+		// 角标面在同一轮派生结果上刷新，且**位于窗格渲染签名去重之前**：面板在屏但签名未变
+		// 时角标也不得停摆（R-01-026/AC-03）。
+		syncBadgeSurface(active, done);
+		// 弹窗开着时跟随快照重绘（计数/条目随会话状态变化，用户不必关掉重开）。
+		if (badgeModalOpen) renderBadgeModal();
 		// listState 参与签名：空列表从 pending/error → ready 时卡集合不变，若只比较卡片
 		// 会被提前返回冻结在「加载中」/「列表加载失败」；数量胶囊可见面变化同样需要
 		// 进入渲染，以便与当前可见等待卡末行重新对相（R-01-002/AC-07）。
@@ -9220,11 +9260,6 @@ function apply(ctx) {
 		const { waiting, blocked, total } = awaitBadgeStats(active);
 		const badge = countBadgeState(listState, waiting, total, blocked);
 		const badgeTone = awaitBadgeTone(active);
-		// 宿主侧栏三状态角标（新增功能）：计数与分组明细在同一处刷新，快照变化驱动
-		// glyph 重渲染；计数增加的那一帧另挂一次强调动画。
-		syncStatusBadges(active, done);
-		// 弹窗开着时跟随快照重绘（计数/条目随会话状态变化，用户不必关掉重开）。
-		if (badgeModalOpen) renderBadgeModal();
 		for (const el of [count, railCount])
 			if (el !== null) {
 				setCountBadgeContent(el, badge);
@@ -9553,6 +9588,7 @@ function apply(ctx) {
 		} catch {}
 		badgePanelDisposer = null;
 		lastBadgeCounts = null;
+		lastBadgeSig = "";
 		// 弹窗回收：摘文档级监听、关闭弹窗并移除其 DOM。入口行的 click 监听挂在
 		// 宿主行按钮上，由注册它的 React effect 卸载时自行清理（badgePanelDisposer
 		// 一注销，宿主即卸载 glyph 组件，effect 清理随之执行）。

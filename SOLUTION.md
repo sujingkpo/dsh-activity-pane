@@ -327,6 +327,8 @@ flowchart LR
 | R-01-022 | 窗格渲染器 | 标题行左侧仓库入口 | src/client.mjs |
 | R-01-023 | 活动状态模型 | 在跑后台任务的活性派生、完成/错误提醒抑制与徽标计数、任务子卡层级与两行呈现、任务子卡档位门控 | src/core.mjs、src/client.mjs |
 | R-01-025 | 窗格渲染器 | 档位资源纪律：紧凑档主会话日志窗口/深翻/目录读取门控、切档再水合与隐藏行跳写、任务子卡不构建与时长时钟门控 | src/core.mjs、src/client.mjs |
+| R-01-026 | 宿主侧栏角标 | 入口行三状态角标、分组明细弹窗与不依赖窗格挂载的数据通路 | src/core.mjs、src/client.mjs |
+
 ## 产品契约
 
 - 活动卡片集合：`活动状态模型#buildEntries(snapshot, workspaceItems, detailsById, completions, delegatingIds, archivedIds, waitingStarts)` 产出已排序的活动卡片条目数组——运行中主会话在前、按最后一次用户指令时间（宿主列表时间）从新到旧；非运行中主会话在后、按进入等待/完成状态的时刻从新到旧——阻塞等待取回合内等待边界开启时刻（`waitingStarts` 入参，Map id → 毫秒时刻，来自宿主侧回合记账 `openWaitStart`，缺失回落宿主列表时间），完成提醒/错误提醒取最近一次回合结束登记时刻（缺失回落宿主列表时间）；两组相同时间保持宿主列表出现顺序（R-01-001）；`completions` 入参（Map id → `{ lastTurnEnd, lastTurnEndKind, lastTurnEndError, ackedAt }`，来自宿主侧 ack 状态）使完成提醒/错误提醒中会话以 awaiting 条目保留在活动区（R-01-002/AC-05、AC-13、R-01-010/AC-06）；awaiting 条目同时携带 `stateAt`（进入当前等待行动状态的时刻：阻塞等待取 `waitingStarts`、完成/错误提醒取 `lastTurnEnd`，与排序键同源同值；不可得为 null——排序键缺失时的宿主列表时间回退仅用于排序，不作显示时刻，R-01-002/AC-14）。`jobs.state.rows`（jobs 服务快照的按会话任务视图）经 `liveJobs` 派生并入 `buildEntries`/`buildRecent`：存在在跑后台任务的主会话归入运行组（排序键沿用宿主列表时间），条目携带 `liveJobs`（`{ id, kind, label, status, startedAt }[]`，`startedAt` 升序）与 `selfRunning`（自身回合是否真实运行，布尔）——前者供渲染层在标题行标注数量（R-01-023/AC-01、AC-04），后者区分「仅后台任务」（隐藏进度行、呈现冻结）与真实回合运行；并为每个在跑任务产出 `kind: "job"` 子条目（`{ id: "job:<sessionId>:<jobId>", parentId, depth+1, kind, title=label, jobKind, jobStatus, jobStartedAt }`，归属会话以 `parentId` 承载），任务子卡为纯展示，激活不触发会话跳转（R-01-023/AC-08）；任务卡两行呈现——第一行为工具名称（经 `jobKindLabel` 友好映射：bash→Bash、pwsh→PowerShell、subagent→子代理，未知 kind 原样、不可得时仅保留状态点与时长）与随时钟推进的已运行时长，第二行为任务内容原文（`label`，mono 单行省略截断，悬停以原生 tooltip 显示完整原文；内容不可得——`label` 缺失或纯空白——时不显示第二行，R-01-023/AC-05、AC-06）；job 子条目的渲染签名携带 `jobsAgeSec`（秒桶，渲染期注入），使任务行时长随时钟照常推进（`jobKind` 不入签名：同一 jobId 的工具类型恒定，任务视图整体已随推送帧入签名）。
@@ -385,6 +387,9 @@ flowchart LR
 
 ## 横切约束
 
+- 角标面与窗格面同源解耦：入口行三状态角标与角标弹窗的计数与分组明细取自**同一轮活动条目派生**（`deriveActiveModel`：快照 → 活动/已完成/最近三分区），与窗格卡片同一口径；两者的快照刷新与订阅不经过任何窗格 DOM 读写，窗格是否挂载、是否处于前台呈现都不影响角标与弹窗更新（R-01-026/AC-03、AC-04、AC-06）。
+  - 渲染入口 `render()` 在取得窗格之前先完成派生的前段（快照归一 + 三分区 + 明细注入），窗格不可得（`ensurePane()` 返回 null）时以固定脉冲面收口角标刷新后返回，不再让角标刷新落在窗格 DOM 之后的路径上。
+  - 角标刷新另起一路去重键（`lastBadgeSig`），不与窗格渲染签名共用：面板被关闭期间窗格签名不推进，共用会让角标停在旧计数。
 - 安全呈现：任何会话标题/文本只经 `textContent` 写入，不走 HTML 拼接（防注入）。
 - 角色纪律：窗格只读，不写回宿主（唯一例外：完成提醒卡「移入历史」按钮的 ack 写回，经宿主侧路由完成，R-01-002/AC-10）；活动数据方向恒为 服务 → 卡片。
 - 依赖边界：`src/core.mjs` 为纯函数（可 Node 单测），`src/client.mjs` 为浏览器 DOM 层。
@@ -433,6 +438,20 @@ flowchart LR
 - 代码位置: src/core.mjs
 - 备注: 宽度夹取纯函数 `clampPaneWidth`（200–480px，非法输入回退默认 280px）亦属本模块，供渲染层拖拽与启动恢复共用（R-01-015/AC-02、AC-04）。
 - 实现: 单端（JS，浏览器与 Node 共用同一份纯逻辑）
+
+### 宿主侧栏角标
+- 职责:
+  - 入口行角标：在宿主左栏面板行列表的 `sidebar.panellist` 槽位注册「活动会话」入口行，行内 glyph 呈现三状态角标（运行中/需要交互/已完成），计数为 0 的点置灰不隐藏（实现 R-01-026）
+  - 分组明细弹窗：接管入口行的点击以打开自建弹窗，按三类列出计数与条目，条目激活跳转会话；Escape 关闭并把焦点归还入口行（实现 R-01-026）
+- 关键内部结构:
+  - 数据通路与窗格渲染画面解耦：计数与明细由 `deriveActiveModel` 的同一轮派生结果驱动，快照刷新、订阅与动画收口不读写窗格 DOM、也不依赖窗格脉冲面；窗格不可得时角标与弹窗照常更新（R-01-026/AC-03、AC-04）。
+  - 口径单点：三类条目与计数由 `src/core.mjs#classifyActiveEntries(entries)` 一次归类给出（运行中 = kind `running`；需要交互 = kind `awaiting` 且 `waitClass` `blocked`；已完成 = kind `awaiting` 且 `waitClass` `done`；计数即各组长度，`statusBadges(entries)` 复用同一归类），渲染层不自算同口径副本，角标计数与弹窗明细必然同源。
+  - 快照与订阅：模块级 `badgeCounts`/`badgeEntries` 经 `subscribeBadgeCounts`/`notifyBadgeCounts` 暴露给 glyph 组件（React `useSyncExternalStore`）；计数相对上一帧增加即播一次强调动画，「需要交互」升级为 alert 变体；动画属性由定时器收口，渲染期不重复续挂。
+  - 刷新去重：角标另起 `lastBadgeSig` 签名（计数三元组 + 明细条目 id 集合），与窗格渲染签名互不干扰——窗格关闭期间窗格签名不推进，共用会让角标停在旧计数。
+  - 弹窗键盘语义：`keydown` 捕获监听随开合成对挂摘，Escape 关闭、Tab 焦点陷阱，关闭时把焦点归还激活入口行的元素（R-01-026/AC-07）。
+  - 入口行点击接管：glyph 经 `closest("button")` 在宿主 PanelRow 行按钮上绑原生 click，`preventDefault` + `stopPropagation` 压掉宿主 `selectPanel(id)`，改为打开弹窗；不在 `document` 上拦点击（R-01-026/AC-02）。
+- 代码位置: src/client.mjs、src/core.mjs
+- 实现: 单端（浏览器 client bundle）
 
 ### 窗格渲染器
 - 职责:
