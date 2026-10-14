@@ -6,7 +6,7 @@ id: T-175
 
 # T-175 角标与弹窗的数据通路抽离窗格渲染面
 
-状态: active
+状态: completed
 关联: R-01-026
 风险等级: standard
 
@@ -64,4 +64,13 @@ id: T-175
 
 ## 终态与证据
 
-（关闭时填写实现、测试、SOLUTION 对照、commit 与 review 证据）
+- 实现: `src/client.mjs` 抽出窗格无关的 `deriveActiveModel()`（置于 `render()` 之前），`render()` 先派生再判窗格，窗格缺席分支刷新角标与弹窗后返回；`syncStatusBadges` 收口为 `syncBadgeSurface(activeEntries, doneList)` 并以 `lastBadgeSig` 独立去重，三处调用点均在窗格渲染签名去重之前。
+- 测试: agentmap lint `passed`（acceptance-criteria=188、test-anchored=188）；`node scripts/check.mjs` → `check: all assertions passed`；`node e2e/run.mjs badge-independence` 与 `badge-surfaces` → PASS；全量 `node e2e/run.mjs`（24 个 spec）→ 22 PASS / 1 SKIP（mobile-shell）/ 1 FAIL，唯一失败的 `e2e/specs/background-jobs.mjs` 在同一基线工作树两次复跑均同样失败于 `e2e/specs/background-jobs.mjs:67` 的「中间档母卡数量注出现」超时，属既有问题。
+- SOLUTION 对照: 需求追溯索引新增 R-01-026 一行，主责子系统为「宿主侧栏角标」，代码位置 `src/client.mjs`、`src/core.mjs` 与实现一致，口径单点为 `src/core.mjs#classifyActiveEntries(entries)`；`## 横切约束` 的「角标面与窗格面同源解耦」与实现呈现一致。
+- commit: 60cd2ee
+- review:
+  - 审核方: Standards 轴子代理 66b6a7e5-7af9-4527-8cbd-ee4f26f367db；Spec 轴子代理 3d7aed91-0cdb-4e5b-95e1-980cc7aed34f（均独立于执行方，评审基线 eba080d8ee8fe9de6b3042e589fbe048ecba61f7）。
+  - 目的理解: 角标与弹窗必须与窗格卡片同源同口径，其更新只依赖宿主会话/工作区/运行状态服务的订阅推送——窗格是否挂载、是否前台呈现都不影响；改动不得引入新的网络轮询，也不得重开用户主动关闭的页签。
+  - 执行方式: code-review skill，两轴并行独立子代理（Standards 轴审仓库编码规范与结构，Spec 轴审 PRD/SOLUTION 契约与验收覆盖），只读工作树并逐条给出 file:line。
+  - 问题与修复: 首轮 8 类发现全部处置——①AC-06 窄条态零证据（补 badge-surfaces 窄条分支：折叠窄条后新建会话并断言已完成计数增长）；②本 task 误引 C-090（改 C-098）；③until 判据空串判真（改真值语义，并修 spec 内被写成双反斜杠的正则）；④AC-03 把停靠页签机制写进 EARS 触发条件（改写为「承载窗格的前台容器」，机制词退场）；⑤check.mjs 窗格缺席分支用固定 400 字近似切片（改锚 `} = deriveActiveModel();` 到该分支后 `applyLayout();` 的区间，并加不含 `pane.` 的负断言）；⑥角标计数与弹窗明细重复 filter 同口径（core 新增 `classifyActiveEntries` 单点，`statusBadges` 复用其长度，SOLUTION 同步）；⑦「不新增轮询」断言锚错函数（从 `syncBadgeSurface` 改锚派生段 `deriveBody`）；⑧`debug.log` 等临时产物混入（已删）。Spec 轴复审另指出「需要交互」组缺非空驱动路径、全量 spec 计数写成 22（实为 24）、基线归因需可重复——已分别补 `e2e:ask` 驱动、修正计数、在同一基线上两次复跑证明失败可重复。
+  - 复审结论: 两轴复审均判定首轮 8 条已消除（Standards 轴用 node 复现 bundle 三段拼接逐字相等并静态重放 check 全部切片断言为真；Spec 轴静态重放 9 条新断言全 PASS 并复核 `git ls-tree` 确认 debug.log 从未入库）；Spec 轴标注 (a)3 为部分覆盖并给出补测路径（已补）。残余风险：`deriveActiveModel()` 返回 8 元裸元组未拆分、`syncBadgeSurface` 的 `doneList` 为文档化保留参数（两处均为审核方同意保留项）；`scripts/check.mjs` 的 R-01-026 结构断言属文本契约而非行为契约。
