@@ -18,7 +18,10 @@ import { fileURLToPath } from "node:url";
 import { startMockLlm } from "./mock-llm.mjs";
 
 const execFileAsync = promisify(execFile);
-const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+const repoRoot = process.env.E2E_REPO_ROOT ?? join(dirname(fileURLToPath(import.meta.url)), "..");
+const DSH_LAUNCHER = { bin: "C:\\Program Files\\DSH Desktop\\DSH Desktop.exe", prefix: ["--expose-internals", "C:\\Program Files\\DSH Desktop\\resources\\app\\lib\\desktop-cli.js"] };
+const withLauncher = (args) => [...DSH_LAUNCHER.prefix, ...args];
+const launcherEnv = (env) => ({ ...env, ELECTRON_RUN_AS_NODE: "1" });
 
 const BOOT_TIMEOUT_MS = 60_000;
 
@@ -72,8 +75,10 @@ function settingsYaml(mockUrl) {
 		"  model: deepseek-flash",
 		// 预置欢迎内测声明确认（dsh 0.1.5 宿主 OnboardingModal）：不预置则宿主会在运行
 		// 途中弹出带遮罩的模态，拦截 spec 的指针操作（环境噪声，非被测行为）。
-		"ui-onboarding:",
-		'  welcomeNoticeVersion: "2026-08-13.1"',
+		"ui-settings-general:",
+		'  welcomeNoticeVersion: "2026-09-28.1"',
+		"locale:",
+		"  preference: en",
 		"",
 	].join("\n");
 }
@@ -139,7 +144,7 @@ export async function bootE2e({ mobileShell = false } = {}) {
 	};
 
 	try {
-		await execFileAsync("dsh", ["plugin", "--profile", "web", "add", repoRoot], { env });
+		await execFileAsync(DSH_LAUNCHER.bin, withLauncher(["plugin", "--profile", "web", "add", repoRoot]), { env: launcherEnv(env) });
 		mark("plugin");
 
 		if (mobileShell) {
@@ -154,7 +159,7 @@ export async function bootE2e({ mobileShell = false } = {}) {
 			mark("shell");
 		}
 
-		web = spawn("dsh", ["web", "--port", "0"], { env, stdio: ["ignore", "pipe", "pipe"], detached: true });
+		web = spawn(DSH_LAUNCHER.bin, withLauncher(["web", "--port", "0"]), { env: launcherEnv(env), stdio: ["ignore", "pipe", "pipe"], detached: true });
 		// 保留 web stderr 尾部供 spec 失败时取证（宿主侧错误不在浏览器控制台出现）。
 		web.stderr.on("data", (data) => {
 			webStderr.push(String(data));

@@ -25,11 +25,32 @@
 // （不消费 ack 游标，C-043），判定在客户端纯函数完成，本侧只维护持久事实与广播。
 
 import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
+// 配置 schema 用 schemastery（与宿主 dsh-settings 的表单投影同一套 schema 语义：
+// .volatile() 标记「可热更新字段」，volatileForm 只投影这些字段）；domain 记录
+// schema 仍是 zod——两者用途不同，故分别引入，不复用同一个 z 名字。
+import schemastery from '@deepseek-ai/schemastery'
 import { z } from 'zod'
 import { applyTurnEventToStats, createSessionEventSerializer, isBusyBoundaryEvent, reconcileTurnStats, turnStatsEqual, turnStatsFrom, truncateErrorNote } from './core.mjs'
 
 export const name = 'dsh-activity-pane'
 export const inject = ['storageDomain', 'webServer', 'sessionQuery', 'connection']
+
+/** 可配置项（配置通道的 schema 声明，参照 @deepseek-ai/dsh-client-ui-theme 的 Config）：
+ *    - position：「面板位置」——'left' 停靠会话区左侧、'right' 呈现于宿主右侧栏；
+ *    - recentHidden：「隐藏最近历史」——true 时不呈现历史区整段；
+ *    - recentCollapsible：「最近历史可折叠」——true 时历史区段头成为折叠开关；
+ *    三项均为 .volatile()：改动只更新配置值、不重挂插件，浏览器半侧经 configForms
+ *    订阅即时生效。
+ *    默认值（东家 2026-10-14 反馈后确定）：position='left'、recentHidden=false 等价于
+ *    原项目行为；recentCollapsible=true ——「最近历史」默认即可折叠，不再需要先配置。
+ *    注意这里的默认值必须与 src/client.mjs 的 PANE_OPTION_DEFAULTS 保持一致：schema 的
+ *    default 永远参与解码，宿主侧这个默认会覆盖浏览器侧的兜底常量。
+ *    宿主侧不读取配置值：本插件宿主半只做持久事实与广播，配置由浏览器半消费。 */
+export const Config = schemastery.object({
+	position: schemastery.union(['left', 'right']).default('left').volatile(),
+	recentHidden: schemastery.boolean().default(false).volatile(),
+	recentCollapsible: schemastery.boolean().default(true).volatile(),
+})
 
 const API_PATH = '/dsh-activity-pane/api'
 

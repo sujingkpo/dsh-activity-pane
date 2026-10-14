@@ -129,19 +129,23 @@ export default async function longList({ page, url, assert }) {
 			return originalScrollTo(options);
 		};
 	});
+	// 完成提醒卡的新归属是「已完成」分区，故当前卡与相邻卡的锚点范围都是
+	// 活动区 +「已完成」区（与产品自动定位/焦点让位的口径一致）。
 	const migrationTarget = await page.evaluate(() => {
-		const cards = [...document.querySelectorAll("[data-dsh-activity-pane] .dap-list .dap-card")];
-		const currentIndex = cards.findIndex((card) => card.matches("[data-current]"));
-		const current = cards[currentIndex];
-		const neighbor = cards[currentIndex - 1] ?? cards[currentIndex + 1];
+		const pane = document.querySelector("[data-dsh-activity-pane]");
+		const all = [...pane.querySelectorAll(".dap-list .dap-card, .dap-done .dap-card")];
+		const currentIndex = all.findIndex((card) => card.matches("[data-current]"));
+		const current = all[currentIndex];
+		const neighbor = all[currentIndex - 1] ?? all[currentIndex + 1];
 		return {
 			currentId: current?.dataset.sessionId ?? null,
 			neighborId: neighbor?.dataset.sessionId ?? null,
+			inDone: current !== undefined && current.closest(".dap-done") !== null,
 		};
 	});
 	assert.ok(migrationTarget.currentId && migrationTarget.neighborId, "迁移回归具备当前卡与相邻活动卡");
 	const currentMigrationCard = page.locator(
-		`[data-dsh-activity-pane] .dap-list .dap-card[data-session-id="${migrationTarget.currentId}"]`,
+		`[data-dsh-activity-pane] .dap-card[data-session-id="${migrationTarget.currentId}"]`,
 	);
 	await currentMigrationCard.evaluate((el) => el.scrollIntoView({ block: "start", behavior: "auto" }));
 	await until("当前完成卡滚入活动区视口", () => currentMigrationCard.evaluate((el) => {
@@ -161,7 +165,7 @@ export default async function longList({ page, url, assert }) {
 	const migrationState = await page.evaluate(({ neighborId, migrationCallCount }) => {
 		const pane = document.querySelector("[data-dsh-activity-pane]");
 		const scroll = pane?.querySelector(".dap-scroll");
-		const neighbor = pane?.querySelector(`.dap-list .dap-card[data-session-id="${neighborId}"]`);
+		const neighbor = pane?.querySelector(`.dap-card[data-session-id="${neighborId}"]`);
 		if (!scroll || !neighbor) return null;
 		const viewport = scroll.getBoundingClientRect();
 		const rect = neighbor.getBoundingClientRect();
@@ -186,6 +190,11 @@ export default async function longList({ page, url, assert }) {
 		delete el.__dapMigrationScrollCalls;
 		delete el.scrollTo;
 	});
+	// 恢复后续 scrollbar 断言所需的前置条件（与本节开头同源）：迁移回归可能把窗格
+	// 停在非零滚动位置，native thumb 因此下移，后面按「thumb 在轨道顶端」硬编码的
+	// 拖拽起点就会落到轨道空白处（表现为拖拽不滚动）。这是测试准备，不是产品行为。
+	await paneScroll.evaluate((el) => { el.scrollTop = 0; });
+	await until("恢复窗格滚动起点（迁移回归后）", () => paneScroll.evaluate((el) => el.scrollTop === 0));
 
 	// R-01-004/AC-01：列表超高时排序在底部的卡片初始不可见，窗格内滚动后可见（全部卡片可达）。
 	// T-133 起活动区「运行中置顶、等待/完成按进入状态时刻倒序」（阻塞等待自 T-141 起
@@ -195,7 +204,7 @@ export default async function longList({ page, url, assert }) {
 		const pane = document.querySelector("[data-dsh-activity-pane]");
 		if (!pane) return false;
 		const paneRect = pane.getBoundingClientRect();
-		const cards = pane.querySelectorAll(".dap-list .dap-card");
+		const cards = pane.querySelectorAll(".dap-list .dap-card, .dap-done .dap-card");
 		const last = cards[cards.length - 1];
 		if (!last) return false;
 		const rect = last.getBoundingClientRect();

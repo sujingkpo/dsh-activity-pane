@@ -1333,6 +1333,54 @@ function awaitBadgeStats(entries) {
  *  awaitBadgeTone（错误 > 阻塞 > 完成，红/金/绿）与脉冲门控同一信号：任一等待行动
  *  （阻塞等待、完成提醒或错误提醒）即脉冲（R-01-002/AC-06，C-037、C-043）。
  *  blocked 入参只用于 aria 文案的计数说明，不再驱动门控。错误轴不算在途，维持计数呈现。 */
+/** 三状态角标计数（新增功能：工作区上方「运行中 / 需要交互 / 已完成」三个角标）：
+ *  只统计主会话条目（子代理与后台任务子条目不计入，与 awaitBadgeStats 同口径）——
+ *  运行中 = kind 'running'；需要交互 = kind 'awaiting' 且 waitClass 'blocked'
+ *  （待确认/待审查/待回复，不含完成提醒与错误提醒）；已完成 = kind 'awaiting'
+ *  且 waitClass 'done'（回合结束且宿主持久态未被标记已读）。
+ *  空/非法输入返回全 0，供「0 值仍常显并置灰」的角标呈现直接使用。 */
+function statusBadges(entries) {
+	let running = 0;
+	let interaction = 0;
+	let completed = 0;
+	for (const entry of Array.isArray(entries) ? entries : []) {
+		if (entry?.kind === "running") {
+			running += 1;
+			continue;
+		}
+		if (entry?.kind !== "awaiting") continue;
+		if (entry.waitClass === "blocked") interaction += 1;
+		else if (entry.waitClass === "done") completed += 1;
+	}
+	return { running, interaction, completed };
+}
+
+/** 「已完成」分区拆分：把完成提醒条目（kind 'awaiting' 且 waitClass 'done'）从活动条目
+ *  里摘出，其余保持原顺序。分区是「呈现分批」，不改动 buildEntries 的派生口径——
+ *  调用方用拆出后的整体计算标题计数徽标，得到与原实现一致的分母。
+ *  未传入/非法输入返回 { done: [], rest: [] }。 */
+function partitionDoneEntries(entries) {
+	const done = [];
+	const rest = [];
+	for (const entry of Array.isArray(entries) ? entries : []) {
+		if (entry?.kind === "awaiting" && entry.waitClass === "done") done.push(entry);
+		else rest.push(entry);
+	}
+	return { done, rest };
+}
+
+/** 「已完成」分区条目的未读判定（点击条目即已读）：readAt 为该会话已读时的
+ *  lastTurnEnd 游标，条目的进入时刻（stateAt = 最近一次回合结束登记时刻）晚于游标
+ *  即为未读——新回合结束会推进 stateAt，旧游标自动失效，条目重新变未读。
+ *  进入时刻不可得（未登记 turn/end）时保守判为未读，不冒充已读。 */
+function doneEntryUnread(entry, readAt) {
+	const entered = Number(entry?.stateAt);
+	const seen = Number(readAt);
+	if (!Number.isFinite(entered)) return true;
+	if (!Number.isFinite(seen)) return true;
+	return entered > seen;
+}
+
 function countBadgeState(listState, waiting, total, blocked = 0) {
 	if (listState === "loading") return { mode: "loading", text: "", ariaText: "活动会话计数加载中", tip: "", awaiting: false };
 	const awaiting = waiting > 0;
@@ -2139,6 +2187,25 @@ function movedToActiveIds(prevRecentIds, active, recent) {
 	return moved;
 }
 
+/** 通用跨区迁移检测：prevIds 中的条目在本帧离开 from 区且出现于 to 区即判定为一次
+ *  迁移。三个分区（活动/已完成/历史）两两之间复用同一实现，避免每对再写一份镜像。
+ *  from/to 都是条目数组；两方都用 String(id) 归一。彻底消失（归档、不再被列出）不判定。 */
+function movedBetweenIds(prevIds, from, to) {
+	if (!(prevIds instanceof Set)) return [];
+	const fromIds = new Set((Array.isArray(from) ? from : []).map((entry) => String(entry?.id)));
+	const toIds = new Set((Array.isArray(to) ? to : []).map((entry) => String(entry?.id)));
+	const moved = [];
+	for (const id of prevIds) {
+		if (!fromIds.has(id) && toIds.has(id)) moved.push(id);
+	}
+	return moved;
+}
+
+/** 「已完成」分区迁移检测别名：语义与 movedBetweenIds 相同，命名让调用点自述意图。 */
+function movedToDoneIds(prevIds, from, to) {
+	return movedBetweenIds(prevIds, from, to);
+}
+
 /** 从 history 事件提取最后回合结束时刻（最后一条 `turn/end` 的有效 time）：
  *  尾部反向扫描，`time` 非有限值的 `turn/end` 跳过继续向前；全部无有效时刻返回 null（R-01-010/AC-08）。 */
 function lastTurnEndFromEvents(events) {
@@ -2867,6 +2934,50 @@ const LOAD_CONCURRENCY = 3;
 const RECENT_PAGE_SIZE = 10;
 /** 「回到顶部」悬浮按钮显隐阈值：scrollTop 超过该值（px）时显示（R-01-018/AC-01）。 */
 const TOP_THRESHOLD = 200;
+/** 面板停靠位置配置的 localStorage 持久化键（left/right 切换）。 */
+const POSITION_STORAGE_KEY = "dsh-activity-pane:position";
+/** 「隐藏最近历史」配置的 localStorage 持久化键。 */
+const RECENT_HIDDEN_STORAGE_KEY = "dsh-activity-pane:recent-hidden";
+/** 「最近历史可折叠」能力开关的 localStorage 持久化键。 */
+const RECENT_COLLAPSIBLE_STORAGE_KEY = "dsh-activity-pane:recent-collapsible";
+/** 最近历史折叠态的 localStorage 持久化键（仅折叠能力开启时读写）。 */
+const RECENT_COLLAPSED_STORAGE_KEY = "dsh-activity-pane:recent-collapsed";
+/** 宿主右侧栏 tab 的注册 id 与 kind：同 id 二次注册会抛错，故取全局唯一常量。 */
+const RIGHT_TAB_ID = "dsh-activity-pane";
+const RIGHT_TAB_KIND = "dsh-activity-pane";
+/** 宿主设置命名空间 = profile 补丁条目 id（与 cordis.patch.yml 的 id 保持一致）。 */
+const SETTINGS_NAMESPACE = "dsh-activity-pane";
+/** 「已完成」分区的 class（在活动区与历史区之间，位于「最近历史」之上）。 */
+const DONE_CLASS = "dap-done";
+/** 「已完成」分区未读游标的 localStorage 持久化键：sessionId → 已读时的 lastTurnEnd。 */
+const DONE_READ_STORAGE_KEY = "dsh-activity-pane:done-read";
+/** 「新增」强调动画的时长（与 CSS 的 dap-badge-hit 0.9s x2 次对齐）：到期摘除属性，
+ *  使下一次新增能重新触发同一段动画。 */
+const BADGE_HIT_MS = 3800;
+/** 「需要交互」新增的强调时长（CSS 0.8s × 4 次）：与 BADGE_HIT_MS 同口径。 */
+const BADGE_ALERT_HIT_MS = 3600;
+/** 迁移后焦点让位定位的有效期（ms）：窗内每次渲染都把焦点卡滚回视口，
+ *  覆盖异步详情到达引起的卡片高度变化；超窗即止，不无界追随。 */
+const FOCUS_HANDOFF_MS = 800;
+/** 宿主侧栏面板 id：同一 id 同时用于 sidebar.panellist 入口行与 main keyed 面板正文。 */
+const BADGE_PANEL_ID = "dsh-activity-pane";
+/** 宿主侧栏「活动会话」面板行/页面 id 与右栏 tab 的 kind 共用同一身份常量。 */
+const BADGE_ROW_ORDER = 5;
+/** 右栏 tab 打开请求的启动竞态重试：最多 RIGHT_TAB_RETRY_MAX 次、间隔
+ *  RIGHT_TAB_RETRY_MS（约 1.5s 窗口）。窗口外永不重试——持续重试会让用户
+ *  手动关闭的 tab 被反复重新打开。 */
+const RIGHT_TAB_RETRY_MAX = 5;
+const RIGHT_TAB_RETRY_MS = 300;
+/** 面板内配置弹层的开关按钮 class。 */
+const SETTINGS_BTN_CLASS = "dap-settings";
+/** 三项新增呈现的缺省值。position/recentHidden 等价于既有行为；recentCollapsible
+ *  按东家 2026-10-14 反馈改为默认开启——「最近历史」段头默认即折叠开关，
+ *  折叠能力本身不再需要配置才可用（配置项仍可关掉它）。 */
+const PANE_OPTION_DEFAULTS = Object.freeze({
+	position: "left",
+	recentHidden: false,
+	recentCollapsible: true,
+});
 
 const CSS = `
 [data-dsh-activity-pane] {
@@ -2884,6 +2995,263 @@ const CSS = `
   background: color-mix(in srgb, currentColor 3%, transparent);
   color: var(--dsw-alias-label-primary, #e8ebf2);
   user-select: none;
+}
+/* ---- 宿主侧栏三状态角标入口行（sidebar.panellist 注册行内的 glyph）----
+   宿主 PanelRow 只给 16/18px 的字形盒，三个带计数的角标放不进一行；因此 glyph 呈现
+   三枚状态色点（运行中/需要交互/已完成），精确计数与分组明细在点击后打开的弹窗里，
+   以及 glyph 的 aria-label / title 上。色点按计数为 0 时置灰，不隐藏（避免布局跳动）。 */
+.dap-badge-glyph {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  width: 18px;
+  height: 18px;
+}
+.dap-badge-glyph i {
+  width: 4px;
+  height: 4px;
+  border-radius: 999px;
+  background: currentColor;
+  opacity: 0.28;
+}
+.dap-badge-glyph i[data-on="true"] { opacity: 1; }
+.dap-badge-glyph i[data-tone="running"][data-on="true"] { background: #65a0ff; }
+.dap-badge-glyph i[data-tone="interaction"][data-on="true"] { background: #d8a12a; }
+.dap-badge-glyph i[data-tone="completed"][data-on="true"] { background: #3fbf7f; }
+/* 「新增」强调：计数增加的那一次播放一次，动画结束后由 JS 摘属性。
+   东家反馈「要明显」：改成 1.2s × 3 次的高对比强调——亮度拉到 2.4、放大到 1.45，
+   并在下方叠一圈放大淡出的光环（::after 只做视觉，不占布局）。
+   「需要交互」新增是最需要被看见的一类，另走更高对比的 dap-badge-hit-alert。 */
+.dap-badge-glyph[data-badge-hit] { animation: dap-badge-hit 1.2s ease-in-out 3; }
+@keyframes dap-badge-hit {
+  0%, 100% { filter: brightness(1); transform: scale(1); }
+  45% { filter: brightness(2.4); transform: scale(1.45); }
+}
+/* 光环：实心圆环 + 放大淡出。用 border 而非径向渐变——仓库有全局断言禁止
+   该渐变字面量（时间线圆点曾因硬停色渐变被否决，C-036/C-061~063）。 */
+.dap-badge-glyph[data-badge-hit]::after {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  border-radius: 999px;
+  pointer-events: none;
+  border: 2px solid currentColor;
+  animation: dap-badge-halo 1.2s ease-out 3;
+}
+@keyframes dap-badge-halo {
+  0% { opacity: 0.9; transform: scale(0.7); }
+  100% { opacity: 0; transform: scale(2.1); }
+}
+/* 「需要交互」新增：金色高对比 + 更快的一轮，与运行中/已完成区分开。 */
+.dap-badge-glyph[data-badge-hit][data-badge-alert] { animation: dap-badge-hit-alert 0.8s ease-in-out 4; color: #ffca4a; }
+@keyframes dap-badge-hit-alert {
+  0%, 100% { filter: brightness(1); transform: scale(1); }
+  50% { filter: brightness(2.8); transform: scale(1.6); }
+}
+.dap-badge-glyph[data-badge-hit][data-badge-alert]::after { animation: dap-badge-halo 0.8s ease-out 4; }
+/* 按「哪一类在涨」给光环上色：运行中蓝、需要交互金、已完成绿。
+   色相对齐三枚状态点，用户不看角标也能从光环颜色判断新增来源。 */
+.dap-badge-glyph[data-badge-hit][data-badge-bump="running"] { color: #65a0ff; }
+.dap-badge-glyph[data-badge-hit][data-badge-bump="completed"] { color: #3fbf7f; }
+/* 角标面板正文：三组明细，与窗格卡片同一视觉语言。 */
+.dap-badge-panel { display: flex; flex-direction: column; gap: 12px; padding: 16px; overflow: auto; }
+.dap-badge-group { display: flex; flex-direction: column; gap: 6px; }
+.dap-badge-group-title { font-size: 11px; font-weight: 700; letter-spacing: 0.06em; color: color-mix(in srgb, currentColor 58%, transparent); }
+.dap-badge-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border: 1px solid color-mix(in srgb, currentColor 14%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, currentColor 5%, transparent);
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.dap-badge-item:hover, .dap-badge-item:focus-visible { background: color-mix(in srgb, currentColor 11%, transparent); }
+.dap-badge-empty { font-size: 12px; color: color-mix(in srgb, currentColor 42%, transparent); }
+
+/* ---- 三状态角标弹窗（点侧栏「活动会话」入口行打开）----
+   遮罩 + 居中对话框；对话框内三组条目，每组一个段头（标题 + 计数）与逐条会话行。
+   视觉沿用宿主浮层语言：layer-2 底、圆角、柔和投影与描边全部取宿主主题别名
+   （--dsw-alias-*），深浅主题自动跟随；仅在别名缺席的裁剪部署里回落到硬编码值。
+   零色字面量的部分（文本/分隔线）用 currentColor 的 mix 派生，主题切换无需改码。 */
+.dap-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  /* 遮罩取宿主 layer-1 深压：与宿主其它浮层（菜单/对话框）同一底色族，
+     不再自造 #0b0d12 常量，浅色主题下也不会出现偏蓝的暗块。 */
+  background: color-mix(in srgb, var(--dsw-alias-bg-mask-2, #0b0d12) 78%, transparent);
+  backdrop-filter: blur(3px);
+  animation: dap-modal-in 0.14s ease-out;
+}
+.dap-modal-backdrop[hidden] { display: none; }
+@keyframes dap-modal-in { from { opacity: 0; } to { opacity: 1; } }
+.dap-modal {
+  display: flex;
+  flex-direction: column;
+  width: min(600px, 100%);
+  max-height: min(76vh, 640px);
+  border: 1px solid var(--dsw-alias-border-l2, color-mix(in srgb, currentColor 16%, transparent));
+  border-radius: 14px;
+  background: var(--dsw-alias-bg-layer-2, #ffffff);
+  color: var(--dsw-alias-label-primary, #0f1115);
+  box-shadow: var(--dsw-alias-bg-mask-drop, 0 18px 48px rgba(0, 0, 0, 0.28));
+  overflow: hidden;
+  animation: dap-modal-rise 0.16s cubic-bezier(0.2, 0.8, 0.3, 1);
+}
+@keyframes dap-modal-rise {
+  from { opacity: 0; transform: translateY(8px) scale(0.985); }
+  to { opacity: 1; transform: none; }
+}
+/* 降低动效偏好：本插件的入场动画整体关闭（与宿主 reduced-motion 口径一致）。 */
+@media (prefers-reduced-motion: reduce) {
+  .dap-modal-backdrop, .dap-modal { animation: none; }
+}
+.dap-modal-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 13px 12px 11px 16px;
+  border-bottom: 1px solid var(--dsw-alias-border-l2, color-mix(in srgb, currentColor 10%, transparent));
+}
+/* 标题左侧的状态汇总点：与各分组色相同源，弹窗收起来也能一眼认出是哪三类。 */
+.dap-modal-title { flex: 1; font-size: 13px; font-weight: 700; letter-spacing: 0.02em; }
+.dap-modal-close {
+  display: flex; align-items: center; justify-content: center;
+  width: 26px; height: 26px; padding: 0;
+  border: 0; border-radius: 8px;
+  background: none; color: inherit; cursor: pointer;
+  transition: background-color 0.12s ease-out;
+}
+.dap-modal-close:hover, .dap-modal-close:focus-visible {
+  background: var(--dsw-alias-interactive-bg-hover, color-mix(in srgb, currentColor 10%, transparent));
+}
+.dap-modal-body { display: flex; flex-direction: column; gap: 16px; padding: 14px 16px 18px; overflow: auto; }
+.dap-modal-group { display: flex; flex-direction: column; gap: 4px; }
+.dap-modal-group-head {
+  display: flex; align-items: center; gap: 7px;
+  /* 段头随滚动吸顶：长列表滚到中段仍能辨认当前分组。 */
+  position: sticky; top: -14px; z-index: 1;
+  padding: 6px 0 6px;
+  background: var(--dsw-alias-bg-layer-2, #ffffff);
+}
+.dap-modal-group-title { font-size: 11px; font-weight: 700; letter-spacing: 0.06em; color: var(--dsw-alias-label-secondary, color-mix(in srgb, currentColor 58%, transparent)); }
+.dap-modal-group-count {
+  min-width: 18px; height: 16px; padding: 0 5px;
+  border-radius: 8px;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 10px; font-weight: 700; line-height: 1;
+  background: color-mix(in srgb, currentColor 12%, transparent);
+}
+.dap-modal-group-count[data-zero] { opacity: 0.45; }
+.dap-modal-group[data-tone="running"] .dap-modal-group-count { color: #2f7ae5; }
+.dap-modal-group[data-tone="interaction"] .dap-modal-group-count { color: #b8831a; }
+.dap-modal-group[data-tone="completed"] .dap-modal-group-count { color: #2f9e6a; }
+.dap-modal-empty { padding: 2px 2px 0; font-size: 12px; line-height: 1.5; color: var(--dsw-alias-label-tertiary, color-mix(in srgb, currentColor 38%, transparent)); }
+.dap-modal-item {
+  display: flex; align-items: center; gap: 9px;
+  width: 100%; padding: 8px 10px;
+  border: 1px solid transparent; border-radius: 8px;
+  background: none; color: inherit; font: inherit; font-size: 12px; text-align: left; cursor: pointer;
+  transition: background-color 0.12s ease-out, border-color 0.12s ease-out;
+}
+.dap-modal-item:hover, .dap-modal-item:focus-visible {
+  background: var(--dsw-alias-interactive-bg-hover, color-mix(in srgb, currentColor 7%, transparent));
+  border-color: var(--dsw-alias-border-l2, color-mix(in srgb, currentColor 12%, transparent));
+}
+.dap-modal-dot { width: 7px; height: 7px; flex: none; border-radius: 50%; background: color-mix(in srgb, currentColor 40%, transparent); }
+.dap-modal-item[data-tone="running"] .dap-modal-dot { background: #65a0ff; }
+.dap-modal-item[data-tone="interaction"] .dap-modal-dot { background: #d8a12a; }
+.dap-modal-item[data-tone="completed"] .dap-modal-dot { background: #3fbf7f; }
+.dap-modal-item-text { display: flex; align-items: baseline; gap: 8px; min-width: 0; flex: 1; }
+.dap-modal-item-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dap-modal-item-ws { flex: none; font-size: 11px; color: var(--dsw-alias-label-tertiary, color-mix(in srgb, currentColor 48%, transparent)); }
+/* 条目行尾的跳转提示：悬停/聚焦才显现，静止时保持列表干净。 */
+.dap-modal-item-go {
+  flex: none; width: 14px; height: 14px;
+  color: var(--dsw-alias-label-tertiary, color-mix(in srgb, currentColor 40%, transparent));
+  opacity: 0; transition: opacity 0.12s ease-out;
+}
+.dap-modal-item:hover .dap-modal-item-go, .dap-modal-item:focus-visible .dap-modal-item-go { opacity: 1; }
+/* ---- 「已完成」分区（位于「最近历史」之上，与活动区/历史区同构）---- */
+[data-dsh-activity-pane] .dap-done {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-top: 1px solid color-mix(in srgb, currentColor 10%, transparent);
+  padding: 10px 8px 0;
+  margin-top: 10px;
+}
+[data-dsh-activity-pane] .dap-done[hidden] { display: none; }
+[data-dsh-activity-pane] .dap-done-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: color-mix(in srgb, currentColor 52%, transparent);
+  text-transform: uppercase;
+}
+/* 未读/已读标识：未读为实心圆点（随状态色），已读为空心圆点。两者都常显，
+   形状差异 + aria-label 承载语义（不只靠颜色）。 */
+[data-dsh-activity-pane] .dap-done .dap-card .dap-dot {
+  width: 7px;
+  height: 7px;
+  background: transparent;
+  border: 1.5px solid color-mix(in srgb, currentColor 45%, transparent);
+}
+[data-dsh-activity-pane] .dap-done .dap-card[data-unread] .dap-dot {
+  background: #3fbf7f;
+  border-color: #3fbf7f;
+}
+/* 未读条目标题加粗一档：形状 + 字重双通道，不只靠颜色区分未读/已读。 */
+[data-dsh-activity-pane] .dap-done .dap-card[data-unread] .dap-title { font-weight: 600; }
+
+/* 新增功能一：停靠在宿主右侧栏 tab 正文内时，窗格不再是中列的 flex 子项，
+   不再靠 --dap-width 撑开中列，也不再绘制左缘 1px 分隔线（右栏自身有边界）；
+   宽高由右栏面板接管，窗格填满正文容器。 */
+/* 右栏停靠时不存在「折叠为窄条」这一形态——右栏由宿主接管宽度与开合
+   （面板折叠按钮就在右栏 chrome 上），窗格自身的标题行折叠必须退场：
+   提示图标隐藏、标题行不再是可激活控件（JS 侧同步摘掉 role/tabindex 与监听）。
+   左右停靠的折叠语义因此各自独立，不互相干扰。 */
+[data-dsh-activity-pane][data-dap-docked="right"] .dap-collapse-hint { display: none; }
+[data-dsh-activity-pane][data-dap-docked="right"] .dap-titlebar { cursor: default; }
+[data-dsh-activity-pane][data-dap-docked="right"] .dap-titlebar:hover { background: none; }
+[data-dsh-activity-pane][data-dap-docked="right"] {
+  flex: 1 1 auto;
+  width: 100%;
+  height: 100%;
+  --dap-width: 100%;
+  border-right: 0;
+  border-left: 1px solid color-mix(in srgb, currentColor 12%, transparent);
+  background: transparent;
+}
+/* 右栏 tab 正文容器：自身不产生内边距与滚动，滚动仍由窗格内的 .dap-scroll 独占。 */
+/* 右栏 tab 标题席位：小图标 + 文字同排（与宿主其它侧栏插件的 chip 一致）。 */
+.dap-right-title { display: inline-flex; align-items: center; gap: 5px; }
+.dap-right-title .dap-badge-glyph { width: 14px; height: 14px; gap: 1px; }
+.dap-right-title .dap-badge-glyph i { width: 3px; height: 3px; }
+.dap-right-host {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
 }
 [data-dsh-activity-pane] .dap-header {
   display: flex;
@@ -3018,6 +3386,71 @@ const CSS = `
   gap: 4px;
   padding: 10px 12px;
 }
+[data-dsh-activity-pane] .dap-dock {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 999px;
+  background: #1d1f25;
+  color: inherit;
+  cursor: pointer;
+}
+[data-dsh-activity-pane] .dap-dock:hover,
+[data-dsh-activity-pane] .dap-dock:focus-visible {
+  background: #262932;
+}
+[data-dsh-activity-pane] .dap-settings {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 999px;
+  background: #1d1f25;
+  color: inherit;
+  cursor: pointer;
+}
+[data-dsh-activity-pane] .dap-settings:hover,
+[data-dsh-activity-pane] .dap-settings:focus-visible {
+  background: #262932;
+}
+/* 面板设置弹层：贴标题行下缘的浮层，点外部或 Esc 关闭（JS 侧单点收敛）。
+   不用宿主 Modal——设置项只有三项，浮层更轻、也不打断窗格布局。 */
+[data-dsh-activity-pane] .dap-settings-pop {
+  position: absolute;
+  top: 38px;
+  right: 8px;
+  z-index: 20;
+  min-width: 190px;
+  padding: 6px;
+  border: 1px solid color-mix(in srgb, currentColor 17%, transparent);
+  border-radius: 10px;
+  background: var(--dsw-alias-bg-layer-2, #1d1f25);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.32);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+[data-dsh-activity-pane] .dap-settings-pop[hidden] { display: none; }
+/* 关闭时彻底移出可访问性树与命中测试（display:none 已挡呈现，这里再兜一层）。 */
+[data-dsh-activity-pane] .dap-settings-pop[inert] { visibility: hidden; }
+[data-dsh-activity-pane] .dap-settings-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+}
+[data-dsh-activity-pane] .dap-settings-row:hover { background: color-mix(in srgb, currentColor 8%, transparent); }
+[data-dsh-activity-pane] .dap-settings-row input { margin: 0; accent-color: #65a0ff; }
 [data-dsh-activity-pane] .dap-density {
   display: flex;
   align-items: center;
@@ -3134,11 +3567,53 @@ const CSS = `
   margin-top: 10px;
 }
 [data-dsh-activity-pane] .dap-recent[hidden] { display: none; }
+/* 新增功能三：最近历史折叠——收起态仅卡片不呈现，段头与「加载更多...」保持可见，
+   以便再次点击展开；段头仅在折叠能力开启时呈可点/可键盘激活形态。 */
+[data-dsh-activity-pane] .dap-recent[data-recent-folded] .dap-card { display: none; }
+[data-dsh-activity-pane] .dap-recent-head[data-foldable] {
+  cursor: pointer;
+  border-radius: 6px;
+  user-select: none;
+  /* 背景显隐加一点过渡，避免鼠标扫过时硬切。 */
+  transition: background-color 120ms ease, color 120ms ease;
+}
+[data-dsh-activity-pane] .dap-recent-head[data-foldable]:hover,
+[data-dsh-activity-pane] .dap-recent-head[data-foldable]:focus-visible {
+  background: color-mix(in srgb, currentColor 8%, transparent);
+  color: inherit;
+}
+[data-dsh-activity-pane] .dap-recent-head[data-foldable]:focus-visible {
+  outline: 2px solid color-mix(in srgb, currentColor 45%, transparent);
+  outline-offset: 1px;
+}
+/* 折叠态箭头提示：展开时朝下、收起时朝右，纯装饰（aria-expanded 承载语义）。 */
+[data-dsh-activity-pane] .dap-recent-head[data-foldable]::after {
+  content: "";
+  width: 6px;
+  height: 6px;
+  margin-left: auto;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(45deg) translate(-1px, -1px);
+}
+[data-dsh-activity-pane] .dap-recent[data-recent-folded] .dap-recent-head[data-foldable]::after {
+  transform: rotate(-45deg);
+}
+/* 段头内边距（东家反馈：hover 背景贴着文字、四边没有余白，观感差）：
+   纵向 5px 给高亮上下留白；横向 10px 让文字与高亮边缘有呼吸。
+   横向用 -8px 负外边距抵消所在分区的 8px 内边距（.dap-recent / .dap-done 的 padding），
+   于是高亮整行铺满滚动区、而文字仍停在改动前的 x=10（原 padding-left 2px + 分区 8px 同值）——
+   文字与下方卡片左缘的对齐关系完全不变，只是高亮变宽变高、不再贴边。
+   两个区段头共用这套几何，因此互相对齐。 */
+[data-dsh-activity-pane] .dap-recent-head,
+[data-dsh-activity-pane] .dap-done-head {
+  padding: 5px 10px;
+  margin: 0 -8px;
+}
 [data-dsh-activity-pane] .dap-recent-head {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 2px 2px 0;
   font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.06em;
@@ -3175,32 +3650,50 @@ const CSS = `
   flex: 1;
   flex-direction: column;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   width: 100%;
   margin: 0;
-  padding: 10px 0 0;
+  padding: 8px 0 0;
   border: 0;
   background: none;
   color: inherit;
   font: inherit;
 }
+/* 窄条内的「展开」方向提示：与标题行的收起提示互为镜像（箭头指向右侧），
+   常态弱化、悬停/聚焦时提亮——给窄条一个明确的「可展开」视觉线索。 */
+[data-dsh-activity-pane] .dap-rail-hint {
+  display: block;
+  color: color-mix(in srgb, currentColor 42%, transparent);
+}
+[data-dsh-activity-pane][data-collapsed="true"] .dap-rail:hover .dap-rail-hint,
+[data-dsh-activity-pane][data-collapsed="true"] .dap-rail:focus-visible .dap-rail-hint {
+  color: currentColor;
+}
 [data-dsh-activity-pane] .dap-rail-count {
-  min-width: 20px;
-  height: 20px;
-  border-radius: 999px;
-  padding: 0 5px;
-  text-align: center;
-  line-height: 20px;
+  min-width: 22px;
+  height: 18px;
+  border-radius: 9px;
+  padding: 0 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   font-size: 10px;
   font-weight: 700;
-  background: color-mix(in srgb, currentColor 16%, transparent);
+  line-height: 1;
+  letter-spacing: 0;
+  background: color-mix(in srgb, currentColor 14%, transparent);
 }
+/* 竖排标题：writing-mode 之后 line-height 是「字距」维度——必须显式给 1.35 左右，
+   否则 unset 的 normal（约 1.2em，按横排基准算）会让中文字形上下相互叠压（东家实测）。
+   letter-spacing 在竖排里同样作用于字距，取 0.08em 保持呼吸感。 */
 [data-dsh-activity-pane] .dap-rail-title {
   writing-mode: vertical-rl;
+  text-orientation: upright;
   font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.1em;
-  color: color-mix(in srgb, currentColor 60%, transparent);
+  font-weight: 600;
+  line-height: 1.4;
+  letter-spacing: 0.08em;
+  color: color-mix(in srgb, currentColor 58%, transparent);
 }
 [data-dsh-activity-pane] .dap-rail-count[data-awaiting] {
   background: rgba(46, 42, 26, 0.97);
@@ -3263,6 +3756,9 @@ const CSS = `
   position: absolute;
   inset: 0;
   pointer-events: none;
+  /* 性能：轨道层每滚动帧写一次 transform（设备像素对齐），预告合成层避免
+     每次写入触发祖先重绘；层内只有 1px 线段，独立层的内存代价可忽略。 */
+  will-change: transform;
 }
 [data-dsh-activity-pane] .dap-conn-track {
   position: absolute;
@@ -3338,13 +3834,24 @@ const CSS = `
   border-color: color-mix(in srgb, #65a0ff 75%, transparent);
   box-shadow: 0 0 0 1px color-mix(in srgb, #65a0ff 45%, transparent), 0 0 12px color-mix(in srgb, #65a0ff 30%, transparent);
 }
-/* 所有卡片统一提供可见的悬停反馈；不覆盖当前/等待态自身的颜色语义。 */
+/* 所有卡片统一提供可见的悬停反馈；不覆盖当前/等待态自身的颜色语义。
+   性能：由 filter: brightness(1.12) 改为等效的实色悬停底（基数 29,31,37 提亮 12%）。
+   filter 会为该卡片子树建立独立的光栅化/合成步骤，而卡片内有网格、徽标与多条
+   1px 描边，滚动中鼠标扫过时逐卡重新光栅化是滚动卡顿的次要来源（浅色主题的
+   悬停底来自 var()，无法预算实色，保持 filter 不变）。 */
 [data-dsh-activity-pane] .dap-card:hover {
-  filter: brightness(1.12);
+  background: rgba(33, 35, 41, 0.94);
 }
+/* 打开中提示（东家 2026-10-14 缺陷：「点过的卡一直在闪」）：动画次数与打开重试链的
+   时间窗对齐——MAX_OPEN_ATTEMPTS（6）乘 500ms 约 3 秒，取 0.9s 乘 3 次共约 2.7 秒
+   （本仓库全局断言禁止 bundle 出现约等于符号，故此处只用文字描述）。
+   刻意不用 infinite：无论重试链因何种意外没有收口（宿主未回推 currentId、
+   右栏 tab 被换成新会话座、卡片元素被重建后属性滞留），闪烁到点即止，
+   残留属性最多只留下一个静态的 0.85 不透明度，不再是无界闪烁。
+   属性摘除仍由渲染期执法与 cancelOpenRetry 的收链路径负责（不依赖动画结束）。 */
 [data-dsh-activity-pane] .dap-card[data-opening] {
   opacity: 0.85;
-  animation: dap-opening 0.9s ease-in-out infinite;
+  animation: dap-opening 0.9s ease-in-out 3;
 }
 @keyframes dap-opening { 0%,100% { opacity: 0.95; } 50% { opacity: 0.5; } }
 [data-dsh-activity-pane] .dap-row {
@@ -4027,17 +4534,25 @@ body:not([data-ds-dark-theme]) [data-dsh-activity-pane] .dap-track {
    （R-01-018/AC-05、R-01-021/AC-05、R-01-022/AC-01）；仓库入口无描边（T-139），只并入底色组。 */
 body:not([data-ds-dark-theme]) [data-dsh-activity-pane] .dap-top,
 body:not([data-ds-dark-theme]) [data-dsh-activity-pane] .dap-density,
+body:not([data-ds-dark-theme]) [data-dsh-activity-pane] .dap-settings,
+body:not([data-ds-dark-theme]) [data-dsh-activity-pane] .dap-dock,
 body:not([data-ds-dark-theme]) [data-dsh-activity-pane] .dap-repo {
   background: var(--dsw-alias-bg-layer-2, #ffffff);
 }
 body:not([data-ds-dark-theme]) [data-dsh-activity-pane] .dap-top,
-body:not([data-ds-dark-theme]) [data-dsh-activity-pane] .dap-density {
+body:not([data-ds-dark-theme]) [data-dsh-activity-pane] .dap-density,
+body:not([data-ds-dark-theme]) [data-dsh-activity-pane] .dap-settings,
+body:not([data-ds-dark-theme]) [data-dsh-activity-pane] .dap-dock {
   border-color: var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.1));
 }
 body:not([data-ds-dark-theme]) [data-dsh-activity-pane] .dap-top:hover,
 body:not([data-ds-dark-theme]) [data-dsh-activity-pane] .dap-top:focus-visible,
 body:not([data-ds-dark-theme]) [data-dsh-activity-pane] .dap-density:hover,
 body:not([data-ds-dark-theme]) [data-dsh-activity-pane] .dap-density:focus-visible,
+body:not([data-ds-dark-theme]) [data-dsh-activity-pane] .dap-settings:hover,
+body:not([data-ds-dark-theme]) [data-dsh-activity-pane] .dap-settings:focus-visible,
+body:not([data-ds-dark-theme]) [data-dsh-activity-pane] .dap-dock:hover,
+body:not([data-ds-dark-theme]) [data-dsh-activity-pane] .dap-dock:focus-visible,
 body:not([data-ds-dark-theme]) [data-dsh-activity-pane] .dap-repo:hover,
 body:not([data-ds-dark-theme]) [data-dsh-activity-pane] .dap-repo:focus-visible {
   background: var(--dsw-alias-bg-layer-3, #eceef1);
@@ -4137,6 +4652,65 @@ function writeStoredDensity(value) {
 	} catch {}
 }
 
+/** 归一停靠位置：仅接受 "right"，其余（缺失/非法）一律回退缺省左列——默认行为与原项目一致。 */
+function normalizePosition(raw) {
+	return raw === "right" ? "right" : PANE_OPTION_DEFAULTS.position;
+}
+
+/** 归一布尔型配置：配置通道给出真布尔时以其为准，否则读 localStorage 的 "true"/"false" 字面量，
+ *  两者皆不可用时回退缺省值——三项新增功能在默认配置下均不改变既有呈现。 */
+function readStoredBool(key, fallback) {
+	try {
+		const raw = window.localStorage.getItem(key);
+		if (raw === "true") return true;
+		if (raw === "false") return false;
+	} catch {}
+	return fallback;
+}
+
+/** 读取持久化停靠位置（配置通道未表态时的兜底）。 */
+function readStoredPosition() {
+	try {
+		return normalizePosition(window.localStorage.getItem(POSITION_STORAGE_KEY));
+	} catch {
+		return PANE_OPTION_DEFAULTS.position;
+	}
+}
+
+/** 「已完成」分区未读游标读取：sessionId → 已读时的 lastTurnEnd（数字）。
+ *  与宿主侧完成确认账本同形（lastTurnEnd 前移即重新未读），但相互独立——本游标只驱动
+ *  分区内的未读/已读标识，不写宿主、不解除完成提醒（R-01-002/AC-05 明确要求打开会话
+ *  不解除提醒）。损坏/不可用时返回空表，全部条目按未读呈现。 */
+function readDoneReadLedger() {
+	const map = new Map();
+	try {
+		const raw = window.localStorage.getItem(DONE_READ_STORAGE_KEY);
+		if (raw === null || raw === "") return map;
+		const parsed = JSON.parse(raw);
+		if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+			for (const [id, at] of Object.entries(parsed)) {
+				const value = Number(at);
+				if (Number.isFinite(value)) map.set(String(id), value);
+			}
+		}
+	} catch {}
+	return map;
+}
+
+/** 写入「已完成」分区未读游标；localStorage 不可用时静默跳过。 */
+function writeDoneReadLedger(map) {
+	try {
+		window.localStorage.setItem(DONE_READ_STORAGE_KEY, JSON.stringify(Object.fromEntries(map)));
+	} catch {}
+}
+
+/** 持久化停靠位置；localStorage 不可用时静默跳过。 */
+function writeStoredPosition(value) {
+	try {
+		window.localStorage.setItem(POSITION_STORAGE_KEY, value);
+	} catch {}
+}
+
 function apply(ctx) {
 	const previousCleanup = document[INSTANCE_KEY] ?? globalThis[INSTANCE_KEY];
 	if (typeof previousCleanup === "function") previousCleanup();
@@ -4161,6 +4735,9 @@ function apply(ctx) {
 	let lastSyncAt = 0;
 	let syncThrottleTimer = null;
 	let lastSig = "";
+	/** 新增呈现配置的去重键（隐藏最近历史 / 最近历史收起态）：与 lastSig 并列，
+	 *  两者都未变才跳过本轮渲染。单独成键是为了不动既有 lastSig 的提交口径。 */
+	let lastOptionSig = "";
 	/** 等待条目 id/类别队列签名：变化时统一重启数量胶囊与等待卡末行动画对相（R-01-002/AC-07、AC-08）。 */
 	let pulseSignature = "";
 	// E2E-only deterministic seams（T-089/T-090）：显式 URL fragment 最多把本页首次列表 ready 呈现
@@ -4191,12 +4768,653 @@ function apply(ctx) {
 	let renderedPane = null;
 	let boundPane = null;
 	let unbindPaneControls = null;
+	/** 停靠面相关的控件态同步钩子（bindPaneControls 安装，卸载清空）：
+	 *  右栏停靠时要摘掉标题行的折叠语义、让设置弹层的复选框对齐生效配置。 */
+	let paneControlSync = null;
 	let collapsed = false;
 	/** 当前桌面列宽：启动时从 localStorage 恢复，拖拽实时更新，重挂载后保留（R-01-015）。 */
 	let paneWidth = readStoredPaneWidth();
 	/** 卡片显示档位（full/medium/compact）：启动时从 localStorage 恢复，切换实时更新，
 	 *  重挂载后保留（R-01-021/AC-06）。 */
 	let densityLevel = readStoredDensity();
+	// ---- 新增呈现配置（面板位置 / 隐藏最近历史 / 最近历史可折叠）----
+	// 双通道：宿主设置服务（dsh-settings 的 configForms，命名空间 = profile 补丁条目 id）
+	// 优先；服务缺席（无 ui-settings 的部署）或字段未表态时回落 localStorage；两者皆
+	// 不可用取缺省值。三项缺省值全部等价于既有行为，默认配置下呈现不变。
+	let configController = null;
+	let configUnsubscribe = null;
+	let hostConfigValue = null;
+	/** 生效中的新增呈现配置（每轮渲染前刷新一次；配置通道变更即时驱动一轮渲染）。 */
+	let paneOptions = {
+		position: readStoredPosition(),
+		recentHidden: readStoredBool(RECENT_HIDDEN_STORAGE_KEY, PANE_OPTION_DEFAULTS.recentHidden),
+		recentCollapsible: readStoredBool(RECENT_COLLAPSIBLE_STORAGE_KEY, PANE_OPTION_DEFAULTS.recentCollapsible),
+		recentCollapsed: readStoredBool(RECENT_COLLAPSED_STORAGE_KEY, false),
+	};
+	let rightTabDisposer = null;
+	let rightSlotDisposer = null;
+	/** 待发起的右栏 tab 打开请求：只在停靠面切到 right 的那一刻置位，消费一次即清。
+	 *  这样「用户关掉 tab」不会被下一轮渲染重新打开。 */
+	let rightTabNeedsRequest = false;
+	/** 「已完成」条目点击即已读：把游标推进到该条目的进入时刻（stateAt）。
+	 *  条目已不在分区/进入时刻不可得时不动游标。写盘后驱动一轮渲染更新未读标记。 */
+	function markDoneRead(sessionId) {
+		const id = String(sessionId);
+		const entry = doneEntriesById.get(id);
+		if (entry === undefined) return;
+		const entered = Number(entry.stateAt);
+		if (!Number.isFinite(entered)) return;
+		const current = doneReadById.get(id);
+		if (Number.isFinite(current) && current >= entered) return;
+		doneReadById.set(id, entered);
+		writeDoneReadLedger(doneReadById);
+		queueSync();
+	}
+
+	/** 宿主侧栏「运行中 / 需要交互 / 已完成」角标入口行：注册 disposer 与上一次已呈现的
+	 *  计数。上一次计数只用于判定「新增」——强调动画只在计数增加的那一次播放。 */
+	let badgePanelDisposer = null;
+	let lastBadgeCounts = null;
+	/** 「已完成」分区未读游标（sessionId → 已读时的 lastTurnEnd，见 readDoneReadLedger）。 */
+	const doneReadById = readDoneReadLedger();
+	/** 本帧「已完成」分区条目索引（sessionId → entry）：点击已读时取当时的进入时刻，
+	 *  避免在事件回调里重跑一遍 buildEntries 派生。 */
+	const doneEntriesById = new Map();
+
+	/** 可选服务解析：不声明 inject 也能读到的宿主服务（未提供时返回 null）。
+	 *  三项新增功能全部建立在可选宿主能力之上——部署裁剪掉右侧栏/设置插件时，
+	 *  本插件必须照常工作，故一律走这条软通道而不进 inject 数组
+	 *  （strict=false：服务未提供时返回 undefined 而非抛错）。 */
+	function optionalService(name) {
+		try {
+			if (typeof ctx.get === "function") return ctx.get(name, false) ?? null;
+			return ctx.reflect?.get?.(name, false) ?? null;
+		} catch {
+			return null;
+		}
+	}
+
+	/** react 运行时（宿主 ModuleLoader 的 require 种子表提供）：只有右栏 tab 正文
+	 *  组件需要它；取不到即整段跳过右栏接线，既有中间列呈现不受影响。 */
+	let rightReactLib = null;
+	function rightReact() {
+		if (rightReactLib === null) rightReactLib = require("react");
+		return rightReactLib;
+	}
+
+	/** 生效值解析：单字段三级回退（配置 → localStorage → 缺省）。 */
+	function effectivePaneOption(key) {
+		const raw = hostConfigValue?.[key];
+		if (key === "position") {
+			if (raw === "left" || raw === "right") return raw;
+			return readStoredPosition();
+		}
+		if (typeof raw === "boolean") return raw;
+		if (key === "recentHidden") {
+			return readStoredBool(RECENT_HIDDEN_STORAGE_KEY, PANE_OPTION_DEFAULTS.recentHidden);
+		}
+		return readStoredBool(RECENT_COLLAPSIBLE_STORAGE_KEY, PANE_OPTION_DEFAULTS.recentCollapsible);
+	}
+
+	/** 刷新生效配置：每轮渲染前调用，折叠态另经 localStorage 记忆。 */
+	function refreshPaneOptions() {
+		paneOptions = {
+			position: effectivePaneOption("position"),
+			recentHidden: effectivePaneOption("recentHidden"),
+			recentCollapsible: effectivePaneOption("recentCollapsible"),
+			recentCollapsed: readStoredBool(RECENT_COLLAPSED_STORAGE_KEY, false),
+		};
+	}
+
+	/** 写回配置通道：控制器可用时经 set 走宿主设置（volatile 字段即时生效、不重挂插件）；
+	 *  不可用时返回 false，由调用方回落 localStorage 通道。 */
+	function writeHostConfig(field, value) {
+		if (configController === null) return false;
+		try {
+			const result = configController.set?.(field, value);
+			result?.catch?.(() => {});
+			return true;
+		} catch {
+			return false;
+		}
+	}
+
+	/** 面板标题行内配置入口：位置在左右间循环切换（localStorage 记忆 + 尝试写回配置）。
+	 *  「隐藏最近历史」「最近历史可折叠」两项由配置文件通道与段头折叠手势承担——
+	 *  面板内不提供隐藏自身的控件，避免用户把历史区藏到找不回来。 */
+	function syncPaneDock() {
+		const wantDock = paneOptions.position === "right" && desktopQuery.matches ? "right" : "left";
+		if (wantDock === paneDock) return;
+		const pane = document.querySelector(`[${PANE_ATTR}]`);
+		paneDock = wantDock;
+		// 停靠面变更即整棵窗格换父：布局态、定位属性与滚动容器都随之改变，
+		// 渲染签名与已渲染 id 集合整体作废，强制下一轮全量重建。
+		renderedPane = null;
+		boundPane = null;
+		lastSig = "";
+		pulseSignature = "";
+		prevRenderedActiveIds = new Set();
+		prevRenderedRecentIds = new Set();
+		if (pane !== null) panelHostRemove(pane);
+		// 切到右栏 = 用户（或启动配置）要求看到面板：置位一次打开请求，由下一轮渲染
+		// 消费并做有界重试。切回左列不动宿主右栏——用户可能正用右栏做别的事，
+		// 关栏是越权。这里不直接调用 openTab：此刻可能还没有在屏会话（宿主会拒绝）。
+		if (paneDock === "right") rightTabNeedsRequest = true;
+	}
+
+	/** 本实例是否曾把中间列改为行方向（左列呈现的接管证据）：换停靠面时据此决定
+	 *  是否需要还原中间列样式——从未接管过的实例（启动即右栏）不得清空宿主自有样式。 */
+	let desktopWasRow = false;
+	/** 停靠目标的宿主 DOM：position=right 的桌面态由宿主右栏 tab 正文提供挂载点
+	 *  （sidebarRightHost），左列态沿用中列会话座之前的位置。 */
+	let paneDock = "left";
+	/** 右栏 tab 正文的挂载容器：由宿主右侧栏渲染的 React 组件在挂载/卸载时置位。 */
+	let sidebarRightHost = null;
+
+	/** 从当前父节点摘除窗格（换停靠面前调用；不销毁元素本身）。 */
+	function panelHostRemove(pane) {
+		pane.removeAttribute("data-dap-docked");
+		pane.remove();
+	}
+
+	/** 宿主右栏呈现期（position=right 且桌面）：窗格挂进右栏 tab 正文容器。 */
+	function mountPaneInRightHost(pane) {
+		if (sidebarRightHost === null) return false;
+		sidebarRightHost.appendChild(pane);
+		pane.setAttribute("data-dap-docked", "right");
+		return true;
+	}
+
+	/** 请求把本插件面板呈现到宿主右侧栏：注册 tab 类型与正文席位，并打开该 tab。
+	 *  整段为可选接线——宿主未提供右侧栏服务（部署裁剪）时静默跳过，配置项退化为
+	 *  「左列 / 右列」内的左列语义。 */
+	function connectSidebarRight() {
+		const tabs = optionalService("sidebarRightTabs");
+		const slots = optionalService("slots");
+		if (!tabs || !slots) return;
+		try {
+			// guide 条目是 tab 被 X 关掉之后的回程：右栏的「+」打开引导页，引导页列出
+			// 各类型贡献的入口胶囊，选中即 openTab(kind, { replaceTab: true }) 重新打开。
+			// 不注册 guide 时该类型只能靠插件自己 openTab，用户手动关掉就再也找不回来
+			//（dsh-auto 的 src/client.js:3569 是同一做法的参照）。
+			rightTabDisposer = tabs.register({
+				id: RIGHT_TAB_ID,
+				kind: RIGHT_TAB_KIND,
+				priority: "builtin",
+				title: () => "活动会话",
+				guide: [{
+					order: 10,
+					title: () => "活动会话",
+					description: () => "正在运行、需要交互与已完成的会话总览",
+					icon: createActivityPaneGlyph,
+				}],
+			}) ?? null;
+		} catch {
+			rightTabDisposer = null;
+			return;
+		}
+		try {
+			// 正文席位与标题席位成对注册：标题席位提供 tab 胶囊里的小图标，
+			// 不注册时 chip 只有文字，与本机其它侧栏插件（文件/上下文）不一致。
+			rightSlotDisposer = slots.inject("sidebar.right.pane.tab", () => [
+				slots.register({ name: "sidebar.right.pane.tab", key: RIGHT_TAB_ID }, createRightPaneBody()),
+				slots.register({ name: "sidebar.right.pane.tab.title", key: RIGHT_TAB_ID }, createRightPaneTitle()),
+			]) ?? null;
+		} catch {
+			rightSlotDisposer = null;
+		}
+		// 此处刻意不请求打开：装配期还不知道配置的停靠面（可能仍是 left），而且
+		// 此刻常无在屏会话会被宿主拒绝。真正的打开由 syncPaneDock 的停靠面转换置位、
+		// render 消费（见 rightTabNeedsRequest）——这条路径同时覆盖「启动即右栏」。
+	}
+
+	/** 发起一次右栏 tab 打开请求（幂等：宿主按 contentId 去重，重复打开只是聚焦）。
+	 *  无在屏会话时宿主会抛错（没有会话就没有停靠面），此处静默吞掉。 */
+	function requestRightTab(sidebar) {
+		if (!sidebar?.openTab) return false;
+		try {
+			sidebar.openTab(RIGHT_TAB_KIND, { revealIfOpened: true });
+			return true;
+		} catch {
+			/* 无在屏会话（hero 页）时右栏不存在，面板在 hero 页按设计不可用 */
+			return false;
+		}
+	}
+
+	/** 有界重试一次打开请求：只要「停靠面切到右栏的那一刻」宿主可能还没把座位绑到
+	 *  当前会话（启动竞态）。重试次数刻意极少且在窗口内——绝不做持续重试，
+	 *  否则用户手动关掉 tab 后会被立刻重新打开（东家 2026-10-14 报的缺陷）。 */
+	function requestRightTabWithRetry() {
+		const attempt = () => requestRightTab(optionalService("sidebarRight"));
+		if (attempt()) return;
+		let tries = 0;
+		const timer = setInterval(() => {
+			tries += 1;
+			if (disposed || paneDock !== "right" || tries > RIGHT_TAB_RETRY_MAX || attempt()) {
+				clearInterval(timer);
+			}
+		}, RIGHT_TAB_RETRY_MS);
+	}
+
+	/** 右栏 tab 的图标（guide 胶囊与 tab 标题席位共用）：与宿主 StateDot 同形的
+	 *  三状态色点（运行中蓝 / 需要交互金 / 已完成绿），几何取 activity-pane 的
+	 *  角标语义。作为函数导出给 tab 定义，由宿主按需调用。 */
+	function createActivityPaneGlyph() {
+		const react = rightReact();
+		return react.createElement(
+			"span",
+			{ className: "dap-badge-glyph", role: "img", "aria-label": "活动会话" },
+			[["running", 1], ["interaction", 1], ["completed", 1]].map(([tone]) =>
+				react.createElement("i", { key: tone, "data-tone": tone, "data-on": "true" }),
+			),
+		);
+	}
+
+	/** 右栏 tab 的标题席位组件：tab 胶囊里的小图标 + 文字。
+	 *  宿主只把 title() 的文字当 chip 文案，图标要经这个席位提供。 */
+	function createRightPaneTitle() {
+		return function RightPaneTitle() {
+			const react = rightReact();
+			return react.createElement(
+				"span",
+				{ className: "dap-right-title" },
+				createActivityPaneGlyph(),
+				react.createElement("span", null, "活动会话"),
+			);
+		};
+	}
+
+	/** 右栏 tab 正文组件：把既有窗格 DOM 挂进一个容器 div。
+	 *  用 createElement 而非 JSX——本插件构建产物不引入 JSX 运行时预编译，宿主
+	 *  ModuleLoader 的 require 表已提供 react。 */
+	function createRightPaneBody() {
+		return function RightPaneBody() {
+			const react = rightReact();
+			const hostRef = react.useRef(null);
+			react.useEffect(() => {
+				const host = hostRef.current;
+				if (host === null) return undefined;
+				sidebarRightHost = host;
+				queueSync();
+				return () => {
+					if (sidebarRightHost === host) sidebarRightHost = null;
+					document.querySelector(`[${PANE_ATTR}]`)?.remove();
+				};
+			}, []);
+			return react.createElement("div", { className: "dap-right-host", ref: hostRef });
+		};
+	}
+
+	// ---- 宿主侧栏三状态角标（新增功能）：glyph 组件读的模块级快照 ----
+	/** 三状态角标的最新计数（syncStatusBadges 每轮刷新）；glyph 组件据此渲染，
+	 *  面板正文据此列出分组明细。初值全 0，对应「0 值仍常显并置灰」。 */
+	let badgeCounts = { running: 0, interaction: 0, completed: 0 };
+	/** 三状态角标明细：按状态分组的条目快照（面板正文列条目用）。 */
+	let badgeEntries = { running: [], interaction: [], completed: [] };
+	/** 强调动画的收口 timer（新增计数时播一次，到期摘属性）。 */
+	let badgeHitTimer = null;
+	const badgeListeners = new Set();
+
+	/** 角标快照订阅（glyph 组件用；重挂载即重新订阅，卸载即全部释放）。 */
+	function subscribeBadgeCounts(listener) {
+		badgeListeners.add(listener);
+		return () => badgeListeners.delete(listener);
+	}
+
+	/** 通知角标订阅者重新读取快照。 */
+	function notifyBadgeCounts() {
+		for (const listener of [...badgeListeners]) {
+			try {
+				listener();
+			} catch {}
+		}
+	}
+
+	/** 三状态角标计数与明细刷新（每轮渲染调用）：统计口径为**主会话条目**——
+	 *  运行中 = kind running；需要交互 = 阻塞等待（待确认/待审查/待回复）；
+	 *  已完成 = 完成提醒（回合结束且未标记已读）。done 分区条目单独统计，
+	 *  不与活动区条目重复计数。计数变化即通知订阅者，并在计数增加时播一次强调动画。 */
+	function syncStatusBadges(activeEntries, doneList) {
+		const runningEntries = activeEntries.filter((entry) => entry.kind === "running");
+		const interactionEntries = activeEntries.filter((entry) => entry.kind === "awaiting" && entry.waitClass === "blocked");
+		const next = {
+			running: runningEntries.length,
+			interaction: interactionEntries.length,
+			completed: doneList.length,
+		};
+		badgeEntries = { running: runningEntries, interaction: interactionEntries, completed: [...doneList] };
+		const prev = lastBadgeCounts;
+		// 「新增」= 计数相对上一帧增加（首次记账只建立基线，不播动画）。
+		// 「需要交互」新增单独识别：它要求用户立刻行动，走更高对比的强调变体
+		//（金色 + 更快一轮），与运行中/已完成的新增区分开。
+		const alert = prev !== null && next.interaction > prev.interaction;
+		// 三种类型任一新增都触发动画（东家 2026-10-14 反馈：每种类型有新增都要提醒）；
+		// 「需要交互」额外升级为 alert 变体，因为它是唯一要求用户立刻行动的一类。
+		const hit = prev !== null
+			&& (next.running > prev.running || next.interaction > prev.interaction || next.completed > prev.completed);
+		const changed = prev === null
+			|| next.running !== prev.running
+			|| next.interaction !== prev.interaction
+			|| next.completed !== prev.completed;
+		lastBadgeCounts = next;
+		badgeCounts = next;
+		if (!changed) return;
+		notifyBadgeCounts();
+		const glyph = document.querySelector(".dap-badge-glyph");
+		if (glyph === null) return;
+		if (badgeHitTimer !== null) {
+			clearTimeout(badgeHitTimer);
+			badgeHitTimer = null;
+		}
+		glyph.removeAttribute("data-badge-hit");
+		glyph.removeAttribute("data-badge-alert");
+		if (!hit || prefersReducedMotion()) return;
+		// 标记本次新增落在哪一类（CSS 按属性给不同色相的光环，用户一眼能看出是哪类在涨）。
+		const bump = prev === null
+			? ""
+			: next.interaction > prev.interaction
+				? "interaction"
+				: next.completed > prev.completed
+					? "completed"
+					: "running";
+		glyph.setAttribute("data-badge-bump", bump);
+		// 强制一次样式重算，保证连续两次新增都能重启同一段动画（摘属性后立即重挂）。
+		void glyph.offsetWidth;
+		if (alert) glyph.setAttribute("data-badge-alert", "");
+		glyph.setAttribute("data-badge-hit", "");
+		// 收口时长按实际动画长度取（alert 更快但次数更多，取两者较大值再留一帧余量）。
+		const hitMs = alert ? BADGE_ALERT_HIT_MS : BADGE_HIT_MS;
+		badgeHitTimer = setTimeout(() => {
+			badgeHitTimer = null;
+			glyph.removeAttribute("data-badge-hit");
+			glyph.removeAttribute("data-badge-alert");
+			glyph.removeAttribute("data-badge-bump");
+		}, hitMs);
+	}
+
+	/** 三状态角标图标组件（sidebar.panellist 的 glyph）：宿主给 16/18px 字形盒，
+	 *  放不下三个带数字的角标，故呈三枚状态色点——精确计数在 aria-label/title
+	 *  与点击后打开的面板里。计数为 0 的点置灰不隐藏（避免布局跳动）。 */
+	function createStatusBadgeGlyph() {
+		return function StatusBadgeGlyph() {
+			const react = rightReact();
+			// useSyncExternalStore：宿主重渲染与计数变化都能拿到最新快照。
+			react.useSyncExternalStore(subscribeBadgeCounts, () => badgeCounts);
+			const counts = badgeCounts;
+			const label = "运行中 " + counts.running + "，需要交互 " + counts.interaction + "，已完成 " + counts.completed;
+			const dots = [["running", counts.running], ["interaction", counts.interaction], ["completed", counts.completed]];
+			// 鼠标与键盘路径统一由「宿主行按钮上的原生 click 监听」承载（见组件内的
+			// useEffect）：宿主把整行绑成了 selectPanel(id)，React 18 的合成事件委托在
+			// 根容器上，故在行按钮自身（冒泡早于根容器）拦下并 stopPropagation，宿主
+			// 处理器即收不到这次点击。
+			// 不在 document 上拦点击：本仓库明令禁止（scripts/check.mjs 有断言）。
+			// 键盘激活同样走 click——<button> 的 Enter/Space 由浏览器合成 click 事件
+			// 派发在按钮自身，无需另绑 keydown。
+			const glyphRef = react.useRef(null);
+			react.useEffect(() => {
+				const glyph = glyphRef.current;
+				const row = glyph === null ? null : glyph.closest("button");
+				if (row === null) return undefined;
+				const onClick = (event) => {
+					event.preventDefault();
+					event.stopPropagation();
+					setBadgeModalOpen(true);
+				};
+				row.addEventListener("click", onClick);
+				// 清理在卸载/行按钮换代时执行：监听器不残留在宿主 DOM 上。
+				return () => row.removeEventListener("click", onClick);
+			}, []);
+			return react.createElement(
+				"span",
+				{
+					className: "dap-badge-glyph",
+					"aria-label": label,
+					title: label,
+					role: "img",
+					ref: glyphRef,
+				},
+				dots.map(([tone, value]) => react.createElement("i", { key: tone, "data-tone": tone, "data-on": value > 0 ? "true" : "false" })),
+			);
+		};
+	}
+
+	/** 角标面板正文（main keyed 面板）：按三个状态分组列出条目，点击条目跳转会话。
+	 *  为空的分组显示占位文案；与窗格共用同一份条目快照。 */
+	function createStatusBadgePanel() {
+		return function StatusBadgePanel() {
+			const react = rightReact();
+			react.useSyncExternalStore(subscribeBadgeCounts, () => badgeEntries);
+			const groups = [
+				["running", "运行中", badgeEntries.running],
+				["interaction", "需要交互", badgeEntries.interaction],
+				["completed", "已完成", badgeEntries.completed],
+			];
+			return react.createElement(
+				"div",
+				{ className: "dap-badge-panel" },
+				groups.map(([tone, title, entries]) => react.createElement(
+					"div",
+					{ className: "dap-badge-group", key: tone },
+					react.createElement("div", { className: "dap-badge-group-title" }, title),
+					entries.length === 0
+						? react.createElement("div", { className: "dap-badge-empty" }, "暂无")
+						: entries.map((entry) => react.createElement(
+							"button",
+							{ key: String(entry.id), type: "button", className: "dap-badge-item", onClick: () => openSessionFromBadge(entry.id) },
+							entry.title ?? String(entry.id),
+						)),
+				)),
+			);
+		};
+	}
+
+	/** 角标面板内的条目跳转：复用窗格的会话导航（uiWorkspace.openSession）。 */
+	function openSessionFromBadge(sessionId) {
+		if (typeof ctx.get("uiWorkspace")?.openSession !== "function") return;
+		lastActivatedId = sessionId;
+		cancelStaleOpenRetries({ activatedId: sessionId });
+		attemptOpen(sessionId, 0);
+	}
+
+	// ---- 三状态角标弹窗（东家 2026-10-14 反馈：点侧栏入口要弹窗打开，而不是切主面板）----
+	/** 弹窗根遮罩元素与内容容器（首次打开时惰性创建，卸载时移除）。 */
+	let badgeModalEl = null;
+	let badgeModalBody = null;
+	let badgeModalOpen = false;
+	/** 打开前的焦点：关闭时归还，键盘用户不丢位置。 */
+	let badgeModalReturnFocus = null;
+
+	/** 惰性创建弹窗骨架：遮罩 + 居中对话框（标题行带关闭按钮）。 */
+	function ensureBadgeModal() {
+		if (badgeModalEl !== null && badgeModalEl.isConnected) return badgeModalEl;
+		const backdrop = makeEl("div", "dap-modal-backdrop");
+		backdrop.hidden = true;
+		const dialog = makeEl("div", "dap-modal");
+		dialog.setAttribute("role", "dialog");
+		dialog.setAttribute("aria-modal", "true");
+		dialog.setAttribute("aria-label", "活动会话");
+		const head = makeEl("div", "dap-modal-head");
+		const title = makeEl("div", "dap-modal-title");
+		title.textContent = "活动会话";
+		const close = document.createElement("button");
+		close.type = "button";
+		close.className = "dap-modal-close";
+		close.setAttribute("aria-label", "关闭");
+		close.title = "关闭";
+		close.append(createCloseIcon());
+		head.append(title, close);
+		const body = makeEl("div", "dap-modal-body");
+		dialog.append(head, body);
+		backdrop.append(dialog);
+		document.body.append(backdrop);
+		badgeModalEl = backdrop;
+		badgeModalBody = body;
+		close.addEventListener("click", () => setBadgeModalOpen(false));
+		backdrop.addEventListener("pointerdown", (event) => {
+			if (event.target === backdrop) setBadgeModalOpen(false);
+		});
+		return backdrop;
+	}
+
+	/** 按当前条目快照重建弹窗内容：三组（运行中 / 需要交互 / 已完成），
+	 *  每条一行——状态色点 + 标题 + 工作区，点击即跳转并关闭弹窗。 */
+	function renderBadgeModal() {
+		if (badgeModalBody === null) return;
+		const groups = [
+			["running", "运行中", badgeEntries.running],
+			["interaction", "需要交互", badgeEntries.interaction],
+			["completed", "已完成", badgeEntries.completed],
+		];
+		const nodes = [];
+		for (const [tone, label, entries] of groups) {
+			const group = makeEl("div", "dap-modal-group");
+			group.dataset.tone = tone;
+			const head = makeEl("div", "dap-modal-group-head");
+			const headTitle = makeEl("span", "dap-modal-group-title");
+			headTitle.textContent = label;
+			const headCount = makeEl("span", "dap-modal-group-count");
+			headCount.textContent = String(entries.length);
+			headCount.toggleAttribute("data-zero", entries.length === 0);
+			head.append(headTitle, headCount);
+			group.append(head);
+			if (entries.length === 0) {
+				const empty = makeEl("div", "dap-modal-empty");
+				empty.textContent = "暂无";
+				group.append(empty);
+			} else {
+				for (const entry of entries) {
+					const item = document.createElement("button");
+					item.type = "button";
+					item.className = "dap-modal-item";
+					item.dataset.tone = tone;
+					item.append(makeEl("span", "dap-modal-dot"));
+					const text = makeEl("span", "dap-modal-item-text");
+					const name = makeEl("span", "dap-modal-item-title");
+					name.textContent = entry.title ?? String(entry.id);
+					text.append(name);
+					if (entry.workspaceTitle) {
+						const ws = makeEl("span", "dap-modal-item-ws");
+						ws.textContent = entry.workspaceTitle;
+						text.append(ws);
+					}
+					// 行尾跳转提示（悬停/聚焦显现）；纯装饰，语义已由条目按钮的可访问名承载。
+					const go = makeEl("span", "dap-modal-item-go");
+					go.append(createGoIcon());
+					item.append(text, go);
+					item.addEventListener("click", () => {
+						setBadgeModalOpen(false);
+						openSessionFromBadge(entry.id);
+					});
+					group.append(item);
+				}
+			}
+			nodes.push(group);
+		}
+		badgeModalBody.replaceChildren(...nodes);
+	}
+
+	/** 开合弹窗：打开时按快照渲染内容并把焦点送进对话框，关闭时归还焦点。 */
+	function setBadgeModalOpen(open) {
+		const el = ensureBadgeModal();
+		if (open === badgeModalOpen) return;
+		badgeModalOpen = open;
+		el.hidden = !open;
+		if (open) {
+			// Esc/Tab 只在弹窗开着时拦截（捕获期早于宿主自己的 Escape 处理）。
+			document.addEventListener("keydown", onBadgeModalKeydown, true);
+			badgeModalReturnFocus = document.activeElement;
+			renderBadgeModal();
+			requestAnimationFrame(() => {
+				if (!badgeModalOpen) return;
+				el.querySelector(".dap-modal-close")?.focus();
+			});
+			return;
+		}
+		document.removeEventListener("keydown", onBadgeModalKeydown, true);
+		const back = badgeModalReturnFocus;
+		badgeModalReturnFocus = null;
+		if (back !== null && back !== undefined && back.isConnected === true) back.focus?.();
+	}
+
+	/** 弹窗的键盘收口（只在弹窗打开期间挂载文档监听，关闭即摘——不做常驻全局监听）：
+	 *  Esc 关闭对话框，Tab 在对话框内循环（焦点陷阱）。两条都必须先判 badgeModalOpen
+	 *  ——常驻监听若在弹窗关闭时仍 preventDefault/stopPropagation，会把宿主的
+	 *  Escape/Tab 行为一并吞掉（宿主用 Esc 关自己的浮层、Tab 走自己的焦点序）。 */
+	function onBadgeModalKeydown(event) {
+		if (!badgeModalOpen) return;
+		if (event.key === "Escape") {
+			event.preventDefault();
+			event.stopPropagation();
+			setBadgeModalOpen(false);
+			return;
+		}
+		if (event.key !== "Tab" || badgeModalEl === null) return;
+		// 焦点陷阱：可聚焦元素为对话框内可见的按钮（关闭键与条目行）。
+		const focusables = [...badgeModalEl.querySelectorAll("button")].filter((el) => !el.disabled && el.offsetParent !== null);
+		if (focusables.length === 0) return;
+		const first = focusables[0];
+		const last = focusables[focusables.length - 1];
+		const active = document.activeElement;
+		// 焦点落在对话框外（或 Tab 越过两端）即回卷到另一端；否则交给浏览器默认顺序。
+		if (event.shiftKey && (active === first || !badgeModalEl.contains(active))) {
+			event.preventDefault();
+			last.focus();
+		} else if (!event.shiftKey && (active === last || !badgeModalEl.contains(active))) {
+			event.preventDefault();
+			first.focus();
+		}
+	}
+	/** 三状态角标接线（可选）：在宿主侧栏注册一行入口（sidebar.panellist，
+	 *  行内 glyph 承载整行点击 → 弹窗）。宿主未提供 slots / react 时整段跳过。 */
+	function connectStatusBadges() {
+		const slots = optionalService("slots");
+		if (!slots) return;
+		try {
+			rightReact();
+		} catch {
+			return;
+		}
+		try {
+			// 只注册侧栏入口行；正文改用自建弹窗（东家 2026-10-14 反馈：点入口要弹窗，
+			// 而不是切到 main 主面板）。因此不再注册 main keyed 面板。
+			badgePanelDisposer = slots.inject("sidebar.panellist", () =>
+				slots.register({ name: "sidebar.panellist", id: BADGE_PANEL_ID, order: BADGE_ROW_ORDER, label: "活动会话" }, createStatusBadgeGlyph()),
+			) ?? null;
+		} catch {
+			badgePanelDisposer = null;
+		}
+		// 不在此常驻挂 keydown：Esc/Tab 监听只服务开着的弹窗，由 setBadgeModalOpen
+		// 成对挂摘（不在 document 上拦点击——本仓库禁止，scripts/check.mjs 有断言）。
+	}
+
+	/** 重读配置通道快照；快照缺失（服务未就绪/命名空间未服务）即回落下一级通道。 */
+	function syncHostConfigValue() {
+		try {
+			hostConfigValue = configController?.getSnapshot?.()?.value ?? null;
+		} catch {
+			hostConfigValue = null;
+		}
+	}
+
+	/** 配置通道接线（可选）：宿主设置服务存在且服务了本插件命名空间时以其为第一优先
+	 *  配置源；服务缺席或命名空间未服务时整段跳过，功能退化到 localStorage 通道。 */
+	function connectHostConfig() {
+		const controller = optionalService("configForms")?.get?.(SETTINGS_NAMESPACE) ?? null;
+		if (controller === null || controller === undefined) return;
+		configController = controller;
+		syncHostConfigValue();
+		try {
+			configUnsubscribe = controller.subscribe?.(() => {
+				if (disposed) return;
+				// volatile-only 写入不重挂插件，配置变更只能靠订阅驱动一轮渲染
+				// （生效值在 render 开头统一重算）。
+				syncHostConfigValue();
+				queueSync();
+			}) ?? null;
+		} catch {
+			configUnsubscribe = null;
+		}
+	}
 	/** 待执行的锚定补偿：档位切换时登记当前选中卡片顶部的视口相对位置，本轮渲染
 	 *  提交后量测该卡新位置并补偿 scrollTop（R-01-021/AC-01）。
 	 *  dsh 0.2.0（T-170 审核）：切回更高档位时窗口经 retain→ready 异步重建，时间线
@@ -4210,6 +5428,19 @@ function apply(ctx) {
 	/** 最近一次已处理的当前卡片；同一卡片的运行时重绘不反复打断用户手动滚动。 */
 	let autoScrolledCurrentId = null;
 	let autoScrolledCurrentCard = null;
+	/** 迁移后的焦点让位是否仍在收敛中：为真时挂起自动定位，避免两者互相推翻
+	 *  （迁移卡此时仍是「当前卡」且已搬入「已完成」区，自动定位会把刚接棒的邻居
+	 *  推出视口）。由 settleFocusTarget 的有界复核循环置位与复位。 */
+	let focusHandoffActive = false;
+	/** 让位定位的目标会话 id 与其有效期截止时刻（见 FOCUS_HANDOFF_MS）。 */
+	let focusHandoffId = null;
+	let focusHandoffUntil = 0;
+	/** 刚跨区迁移过、因而不参与自动定位的会话 id：迁移卡在迁移前往往就是「当前卡」，
+	 *  搬入新区后自动定位会追着它把刚接棒焦点的邻居推出视口。集合在当前会话
+	 *  （由用户导航决定）发生变化时清空——下次用户切到该会话仍会正常定位。 */
+	const autoScrollSkipIds = new Set();
+	/** 上一帧的当前会话 id：变化即视为一次用户导航，重置上条的跳过集合。 */
+	let lastCurrentSessionId = null;
 	/** 完成确认状态（R-01-002/AC-03、AC-10～AC-12）：id → { lastTurnEnd, ackedAt }，
 	 *  来自宿主侧 ack 通道（SSE 全量快照），随每次推送整体替换。 */
 	const completeAcksById = new Map();
@@ -4227,6 +5458,10 @@ function apply(ctx) {
 	const cardsById = new Map();
 	/** 历史区卡片 id → { el } 复用表。 */
 	const recentCardsById = new Map();
+	/** 「已完成」分区卡片 id → { el } 复用表（与活动/历史区同构，参与迁移量取与回收）。 */
+	const doneCardsById = new Map();
+	/** 上一帧「已完成」分区已渲染的 id 集合（迁移检测的输入）。 */
+	let prevRenderedDoneIds = new Set();
 	/** 历史区渐进呈现状态：候选由核心完整派生，DOM 与详情读取只覆盖当前前缀。 */
 	let recentVisibleCount = RECENT_PAGE_SIZE;
 	let recentTotal = 0;
@@ -4443,7 +5678,10 @@ function apply(ctx) {
 		if (seat === null || seat.parentElement === null) return;
 		const center = seat.parentElement;
 		let changed = false;
-		if (!desktopQuery.matches) {
+		// 右栏呈现（position=right）时右栏由宿主自管宽度与让位，本插件不得再接管
+		// 中间列布局：与移动端同一形状——清空既有接管样式、恢复外壳默认列布局。
+		if (desktopQuery.matches && paneDock === "left") desktopWasRow = true;
+		if (!desktopQuery.matches || paneDock === "right") {
 			// 移动端：抽屉脱离文档流（fixed），不参与主会话布局；恢复外壳默认
 			// 列布局，避免行方向扰动移动端主会话显示（R-01-008）。
 			if (center.style.flexDirection !== "") {
@@ -5367,11 +6605,31 @@ function apply(ctx) {
 		};
 		// 标题行整体即收起控件，两端断点一致：桌面折叠为窄条（R-01-011/AC-03）；
 		// 移动端断点解释为收起抽屉，而非折叠窄条（R-01-008/AC-02、R-01-011/AC-06）。
+		// 右栏停靠（新增功能一）：右栏由宿主接管宽度与开合，窗格自身的折叠形态不存在，
+		// 标题行不再是收起控件——摘掉按钮语义与键盘序，并让激活直接返回。
+		const syncHeaderCollapseAffordance = () => {
+			if (header === null) return;
+			const disabled = pane.getAttribute("data-dap-docked") === "right";
+			if (disabled) {
+				header.removeAttribute("role");
+				header.removeAttribute("tabindex");
+				header.removeAttribute("aria-expanded");
+				header.setAttribute("title", "面板设置");
+			} else {
+				header.setAttribute("role", "button");
+				header.setAttribute("tabindex", "0");
+				header.setAttribute("aria-expanded", collapsed ? "false" : "true");
+				header.setAttribute("title", "收起");
+			}
+		};
+		syncHeaderCollapseAffordance();
 		const onHeaderActivate = () => {
 			if (window.matchMedia(`(max-width: ${MOBILE_BREAKPOINT})`).matches) {
 				togglePane(false);
 				return;
 			}
+			// 右栏呈现期折叠整体退场（由宿主的面板控件承担），移动断点之外的激活直接返回。
+			if (pane.getAttribute("data-dap-docked") === "right") return;
 			collapsed = true;
 			pane.setAttribute("data-collapsed", "true");
 			queueSync();
@@ -5444,7 +6702,12 @@ function apply(ctx) {
 		// 由平滑滚动触发的 scroll 事件自然完成。
 		let scrollHideTimer = null;
 		const onScroll = () => {
-			queueTrackSync(); // 滚动停在小数相位后重对齐轨道层（rAF 合帧）
+			// 滚动热路径（每次 scroll 事件都跑）：只做三类不能省的窄工作——轨道层
+			// 重对齐（rAF 合帧，单次读数）、滚动条显隐属性、回顶按钮显隐。整轮
+			// render() 不参与滚动：数据变化经 queueSync 的既有节流进入，滚动本身
+			// 不产生渲染（滚动卡顿排查结论之二：滚动期唯一 O(卡片数) 的几何量取
+			// 已由 syncTracks 的 alignmentOnly 通路消除）。
+			queueTrackSync();
 			scroll.setAttribute("data-scrolling", "");
 			syncTopBtn();
 			if (scrollHideTimer !== null) clearTimeout(scrollHideTimer);
@@ -5460,6 +6723,115 @@ function apply(ctx) {
 		};
 		// 显示档位循环切换（R-01-021/AC-01）：紧凑→中间→完整→紧凑，形态写窗格根属性
 		// 驱动纯 CSS 呈现，持久化于 localStorage（AC-06），会话状态变化不触碰已选档位（AC-07）。
+		// 面板标题行内配置入口（位置左右切换）：走双通道写入——配置通道可用即写
+		// 配置（volatile 即时生效），否则写 localStorage；两者都会经 queueSync 驱动
+		// 停靠面切换，切换本身在 render→syncPaneDock 内完成。
+		const dockBtn = pane.querySelector(".dap-dock");
+		const onDockClick = () => {
+			const next = paneOptions.position === "right" ? "left" : "right";
+			paneOptions = { ...paneOptions, position: next };
+			writeStoredPosition(next);
+			writeHostConfig("position", next);
+			syncPaneDock();
+			queueSync();
+		};
+		// 面板设置弹层（新增功能一~三的配置落点）：开关按钮切换显隐，点弹层外或 Esc 关闭；
+		// 三项复选框与生效配置双向同步（写入仍走双通道：配置优先、localStorage 兜底）。
+		const settingsBtn = pane.querySelector(".dap-settings");
+		const settingsPop = pane.querySelector(".dap-settings-pop");
+		const setSettingsOpen = (open) => {
+			if (settingsPop === null || settingsBtn === null) return;
+			settingsPop.hidden = !open;
+			settingsBtn.setAttribute("aria-expanded", open ? "true" : "false");
+			syncSettingsInert();
+		};
+		// 弹层关闭时从 a11y 树与 Tab 序整体移除（hidden 只挡呈现，不影响 focus 顺序）。
+		const syncSettingsInert = () => {
+			if (settingsPop === null) return;
+			if (settingsPop.hidden) settingsPop.setAttribute("inert", "");
+			else settingsPop.removeAttribute("inert");
+		};
+		/** 把生效配置写进复选框与按钮态（每轮渲染后调用，保证外部改配置也同步）。 */
+		const syncSettingsControls = () => {
+			if (settingsPop === null) return;
+			for (const input of settingsPop.querySelectorAll("input[data-setting]")) {
+				const key = input.getAttribute("data-setting");
+				const want = key === "position"
+					? paneOptions.position === "right"
+					: key === "recentHidden"
+						? paneOptions.recentHidden === true
+						: paneOptions.recentCollapsible === true;
+				if (input.checked !== want) input.checked = want;
+			}
+			if (dockBtn !== null) {
+				const right = paneOptions.position === "right";
+				dockBtn.setAttribute("aria-label", right ? "面板移回左侧" : "面板移到右侧");
+				dockBtn.title = right ? "面板移回左侧" : "面板移到右侧";
+			}
+		};
+		const onSettingsClick = (event) => {
+			event.stopPropagation();
+			if (settingsPop === null) return;
+			setSettingsOpen(settingsPop.hidden);
+		};
+		/** 复选框 → 生效配置：三项共用一条写入路径（写双通道后驱动一轮渲染）。 */
+		const onSettingsChange = (event) => {
+			const input = event.target;
+			if (!(input instanceof HTMLInputElement)) return;
+			const key = input.getAttribute("data-setting");
+			if (key === "position") {
+				const next = input.checked ? "right" : "left";
+				paneOptions = { ...paneOptions, position: next };
+				writeStoredPosition(next);
+				writeHostConfig("position", next);
+				syncPaneDock();
+			} else if (key === "recentHidden") {
+				const next = input.checked === true;
+				paneOptions = { ...paneOptions, recentHidden: next };
+				try {
+					window.localStorage.setItem(RECENT_HIDDEN_STORAGE_KEY, String(next));
+				} catch {}
+				writeHostConfig("recentHidden", next);
+			} else if (key === "recentCollapsible") {
+				const next = input.checked === true;
+				paneOptions = { ...paneOptions, recentCollapsible: next };
+				try {
+					window.localStorage.setItem(RECENT_COLLAPSIBLE_STORAGE_KEY, String(next));
+				} catch {}
+				writeHostConfig("recentCollapsible", next);
+			}
+			syncSettingsControls();
+			queueSync();
+		};
+		const onDocumentPointerDown = (event) => {
+			if (settingsPop === null || settingsPop.hidden) return;
+			if (settingsPop.contains(event.target) || settingsBtn?.contains(event.target)) return;
+			setSettingsOpen(false);
+		};
+		const onDocumentKeydown = (event) => {
+			if (event.key !== "Escape" || settingsPop === null || settingsPop.hidden) return;
+			setSettingsOpen(false);
+		};
+		document.addEventListener("pointerdown", onDocumentPointerDown, true);
+		document.addEventListener("keydown", onDocumentKeydown, true);
+		syncSettingsInert();
+
+		// 最近历史段头即折叠开关（仅在 recentCollapsible 开启时呈现可激活态）：
+		// 折叠态写 localStorage 记忆，点击在收起/展开间翻转。
+		const recentHead = pane.querySelector(".dap-recent-head");
+		const onRecentHeadClick = () => {
+			if (!paneOptions.recentCollapsible) return;
+			paneOptions = { ...paneOptions, recentCollapsed: !paneOptions.recentCollapsed };
+			try {
+				window.localStorage.setItem(RECENT_COLLAPSED_STORAGE_KEY, String(paneOptions.recentCollapsed));
+			} catch {}
+			queueSync();
+		};
+		const onRecentHeadKeydown = (event) => {
+			if (event.key !== "Enter" && event.key !== " ") return;
+			event.preventDefault();
+			onRecentHeadClick();
+		};
 		const densityBtn = pane.querySelector(".dap-density");
 		const applyDensity = () => {
 			pane.setAttribute("data-density", densityLevel);
@@ -5493,6 +6865,17 @@ function apply(ctx) {
 		// 冒泡为标题区折叠，无需额外阻断。
 		densityBtn?.addEventListener("click", onDensityClick);
 		applyDensity();
+		dockBtn?.addEventListener("click", onDockClick);
+		settingsBtn?.addEventListener("click", onSettingsClick);
+		settingsPop?.addEventListener("change", onSettingsChange);
+		syncSettingsControls();
+		// 暴露给 render 的每轮同步钩子（换停靠面后 pane 不变、控件态仍需重算）。
+		paneControlSync = () => {
+			syncHeaderCollapseAffordance();
+			syncSettingsControls();
+		};
+		recentHead?.addEventListener("click", onRecentHeadClick);
+		recentHead?.addEventListener("keydown", onRecentHeadKeydown);
 		header?.addEventListener("click", onHeaderActivate);
 		header?.addEventListener("keydown", onHeaderKeydown);
 		rail?.addEventListener("click", onRailClick);
@@ -5503,6 +6886,14 @@ function apply(ctx) {
 		topBtn?.addEventListener("click", onTopClick);
 		resize?.addEventListener("pointerdown", onResizeDown);
 		return () => {
+			dockBtn?.removeEventListener("click", onDockClick);
+			settingsBtn?.removeEventListener("click", onSettingsClick);
+			settingsPop?.removeEventListener("change", onSettingsChange);
+			document.removeEventListener("pointerdown", onDocumentPointerDown, true);
+			document.removeEventListener("keydown", onDocumentKeydown, true);
+			setSettingsOpen(false);
+			recentHead?.removeEventListener("click", onRecentHeadClick);
+			recentHead?.removeEventListener("keydown", onRecentHeadKeydown);
 			header?.removeEventListener("click", onHeaderActivate);
 			header?.removeEventListener("keydown", onHeaderKeydown);
 			rail?.removeEventListener("click", onRailClick);
@@ -5524,18 +6915,32 @@ function apply(ctx) {
 		placeToggle();
 		// 帧观察器在 frame 就绪后补挂（外壳重挂载后 frame 为新元素，须重挂）。
 		armFrameObserver();
+		// 停靠面判定先行：position=right 的桌面态把窗格挂进宿主右栏 tab 正文容器
+		// （sidebarRightHost 由右栏正文组件置位）；容器未就绪时不建窗格，等
+		// 宿主右栏渲染后的 queueSync 再建——不会误挂到中间列后又被搬走。
+		const wantRight = paneOptions.position === "right" && desktopQuery.matches;
+		if (wantRight && sidebarRightHost === null) return null;
 		const seat = document.querySelector(CONVERSATION_SELECTOR);
 		if (seat === null || seat.parentElement === null) return null;
 		// [data-slot="conversation"] 的父级是 AppFrame 的中间列（flex column）。
 		// 窗格作为该父级的真实 flex 子项、插在会话座之前（行方向 → 窗格在左），
 		// 与其它元素一起参与布局，而不是浮层。
 		const center = seat.parentElement;
-		let pane = center.querySelector(`[${PANE_ATTR}]`);
+		let pane = wantRight
+			? sidebarRightHost.querySelector(`[${PANE_ATTR}]`)
+			: center.querySelector(`[${PANE_ATTR}]`);
 		if (pane === null) {
 			pane = document.createElement("aside");
 			pane.setAttribute(PANE_ATTR, "");
 			pane.className = PANE_CLASS;
-			center.insertBefore(pane, seat);
+			// 挂载点按停靠面分派：右栏塞进宿主右栏正文容器，左列维持原插入点
+			// （会话座之前）。原左列路径逐字保留，默认配置下建出的 DOM 与原项目一致。
+			if (wantRight) {
+				sidebarRightHost.appendChild(pane);
+				pane.setAttribute("data-dap-docked", "right");
+			} else {
+				center.insertBefore(pane, seat);
+			}
 			pane.innerHTML = `
 				<div class="dap-header">
 					<a class="dap-repo" href="https://github.com/ccll/dsh-activity-pane" target="_blank" rel="noreferrer noopener" aria-label="报告问题" title="报告问题，点赞收藏"></a>
@@ -5546,19 +6951,34 @@ function apply(ctx) {
 					</span>
 					<span class="dap-tools">
 						<button class="dap-density" type="button" aria-label="切换为完整显示" title="完整显示"></button>
+						<button class="dap-settings" type="button" aria-label="面板设置" title="面板设置" aria-expanded="false" aria-haspopup="true"></button>
+						<button class="dap-dock" type="button" aria-label="面板移到右侧" title="面板移到右侧"></button>
 					</span>
+					<!-- 配置弹层文案刻意不出现「最近历史」这个连续子串：历史区段头用该串作为
+					     区域标记，e2e 的 paneRegions 按 pane.textContent 里的首个该串切分
+					     活动区/历史区——弹层在 DOM 序里位于段头之前，一旦带上该串就会把
+					     活动区截断在弹层处（实测三个 spec 因此失败）。 -->
+					<div class="dap-settings-pop" hidden>
+						<label class="dap-settings-row"><input type="checkbox" data-setting="position" /><span>面板停靠到右侧</span></label>
+						<label class="dap-settings-row"><input type="checkbox" data-setting="recentHidden" /><span>隐藏历史区</span></label>
+						<label class="dap-settings-row"><input type="checkbox" data-setting="recentCollapsible" /><span>历史区可折叠</span></label>
+					</div>
 				</div>
 				<div class="dap-scroll">
 					<div class="dap-list" tabindex="-1"><div class="dap-tracks" aria-hidden="true"></div></div>
+					<div class="dap-done" hidden>
+						<div class="dap-done-head"><span>已完成</span></div>
+					</div>
 					<div class="dap-recent">
 						<div class="dap-recent-head"><span>最近历史</span></div>
 						<button class="dap-recent-more" type="button" hidden>加载更多...</button>
 					</div>
 				</div>
 				<button class="dap-top" type="button" aria-label="回到顶部" title="回到顶部" hidden></button>
-				<button class="dap-rail" type="button" aria-label="展开活动会话窗格">
-					<span class="dap-rail-title" aria-hidden="true">活动会话</span>
+				<button class="dap-rail" type="button" aria-label="展开活动会话窗格" title="展开">
+					<span class="dap-rail-hint" aria-hidden="true"></span>
 					<span class="dap-rail-count" role="status" aria-live="polite"></span>
+					<span class="dap-rail-title" aria-hidden="true">活动会话</span>
 				</button>
 				<div class="dap-resize" aria-hidden="true"></div>
 			`;
@@ -5568,13 +6988,20 @@ function apply(ctx) {
 			// 紧凑显示切换按钮常显于标题行右侧工具区（R-01-021/AC-05）；切换时以 data-density
 			// 驱动纯 CSS 呈现，骨架重建后由 bindPaneControls 的 applyDensity 恢复形态。
 			pane.querySelector(".dap-density").append(createDensityIcon());
+			// 面板设置入口（配置项集中落点）：标题行工具区常显，图标在创建时注入。
+			pane.querySelector(".dap-settings").append(createSettingsIcon());
+			// 面板位置切换入口（配置项的位置字段）：标题行工具区常显，图标在创建时注入。
+			pane.querySelector(".dap-dock").append(createDockIcon());
 			// 仓库入口常显于标题行最左独立区（R-01-022/AC-01，T-144）；图标在创建时注入。
 			pane.querySelector(".dap-repo").append(createRepoIcon());
 			// 收起方向图标为标题行悬停/聚焦的可见性提示（R-01-011/AC-07），图标在创建时注入。
 			pane.querySelector(".dap-collapse-hint").append(createCollapseIcon());
+			// 窄条内的展开方向提示（与收起提示镜像）：图标在创建时注入。
+			pane.querySelector(".dap-rail-hint").append(createExpandIcon());
 		}
 		if (pane !== boundPane) {
 			unbindPaneControls?.();
+			paneControlSync = null;
 			unbindPaneControls = bindPaneControls(pane);
 			boundPane = pane;
 		}
@@ -5774,6 +7201,65 @@ function apply(ctx) {
 		});
 	}
 
+	/** 面板位置切换图标（新增功能一）：外框 + 右侧竖分隔线，表达「面板停靠到右侧」；
+	 *  与档位按钮同用 14px 字形盒，视觉强度一致。 */
+	function createDockIcon() {
+		return createInlineIcon({
+			viewBox: "0 0 14 14",
+			width: 14,
+			height: 14,
+			parts: [
+				{ attrs: { d: "M2.75 3h8.5a.75.75 0 0 1 .75.75v6.5a.75.75 0 0 1-.75.75h-8.5A.75.75 0 0 1 2 10.25v-6.5A.75.75 0 0 1 2.75 3Z", stroke: "currentColor", "stroke-width": "1.5", "stroke-linecap": "round", "stroke-linejoin": "round" } },
+				{ attrs: { d: "M8.75 3.5v7", stroke: "currentColor", "stroke-width": "1.5", "stroke-linecap": "round", "stroke-linejoin": "round" } },
+			],
+		});
+	}
+
+	/** 面板设置图标：两条滑杆（线 + 圆形滑钮），与工具区既有图标同用 14px 字形盒。
+	 *  早期版本用「三条全宽横线 + 三道竖划」表达三档滑杆，14px 下竖划与横线交叉成一团、
+	 *  形似汉字（东家反馈「像乱码」）；改为两条滑杆 + 实心圆滑钮，小尺寸下轮廓干净。 */
+	function createSettingsIcon() {
+		return createInlineIcon({
+			viewBox: "0 0 14 14",
+			width: 14,
+			height: 14,
+			parts: [
+				{ attrs: { d: "M2.25 4.5h9.5", stroke: "currentColor", "stroke-width": "1.4", "stroke-linecap": "round" } },
+				{ attrs: { d: "M2.25 9.5h9.5", stroke: "currentColor", "stroke-width": "1.4", "stroke-linecap": "round" } },
+				{ tag: "circle", attrs: { cx: "5", cy: "4.5", r: "1.9", fill: "currentColor" } },
+				{ tag: "circle", attrs: { cx: "9", cy: "9.5", r: "1.9", fill: "currentColor" } },
+			],
+		});
+	}
+
+	/** 弹窗关闭按钮图标：两条对角交叉线，14px 字形盒（与工具区图标同规格）。 */
+	function createCloseIcon() {
+		return createInlineIcon({
+			viewBox: "0 0 14 14",
+			width: 12,
+			height: 12,
+			parts: [
+				{ attrs: { d: "M3.5 3.5l7 7", stroke: "currentColor", "stroke-width": "1.5", "stroke-linecap": "round" } },
+				{ attrs: { d: "M10.5 3.5l-7 7", stroke: "currentColor", "stroke-width": "1.5", "stroke-linecap": "round" } },
+			],
+		});
+	}
+
+	/** 窄条的「展开」方向图标：左侧竖杠 + 向右箭头指向竖杠，与标题行的收起提示镜像。
+	 *  窄条上没有标题行，这个图标是「点这里能展开」的唯一视觉线索。 */
+	function createExpandIcon() {
+		return createInlineIcon({
+			viewBox: "0 0 14 14",
+			width: 12,
+			height: 12,
+			parts: [
+				{ attrs: { d: "M3 2.5v9", stroke: "currentColor", "stroke-width": "1.5", "stroke-linecap": "round", "stroke-linejoin": "round" } },
+				{ attrs: { d: "M2.5 7H9", stroke: "currentColor", "stroke-width": "1.5", "stroke-linecap": "round", "stroke-linejoin": "round" } },
+				{ attrs: { d: "M6.25 3.75 9.5 7l-3.25 3.25", stroke: "currentColor", "stroke-width": "1.5", "stroke-linecap": "round", "stroke-linejoin": "round" } },
+			],
+		});
+	}
+
 	/** 标题行的「收起」方向图标（R-01-011/AC-07）：左侧竖杠 + 向左箭头指向竖杠，
 	 *  表达窗格收缩到左侧；随 .dap-collapse-hint 在标题行悬停/聚焦时显现。 */
 	function createCollapseIcon() {
@@ -5785,6 +7271,19 @@ function apply(ctx) {
 				{ attrs: { d: "M3 2.5v9", stroke: "currentColor", "stroke-width": "1.5", "stroke-linecap": "round", "stroke-linejoin": "round" } },
 				{ attrs: { d: "M11.5 7H5", stroke: "currentColor", "stroke-width": "1.5", "stroke-linecap": "round", "stroke-linejoin": "round" } },
 				{ attrs: { d: "M8.25 3.75 5 7l3.25 3.25", stroke: "currentColor", "stroke-width": "1.5", "stroke-linecap": "round", "stroke-linejoin": "round" } },
+			],
+		});
+	}
+
+	/** 弹窗条目行尾的「前往」箭头（几何与 createExpandIcon 同源，归一到 14 盒）：
+	 *  悬停/聚焦时才显现，提示该行可点击跳转。 */
+	function createGoIcon() {
+		return createInlineIcon({
+			viewBox: "0 0 14 14",
+			width: 14,
+			height: 14,
+			parts: [
+				{ attrs: { d: "M5 3.5 8.5 7 5 10.5", stroke: "currentColor", "stroke-width": "1.5", "stroke-linecap": "round", "stroke-linejoin": "round" } },
 			],
 		});
 	}
@@ -6663,16 +8162,40 @@ function apply(ctx) {
 		if (trackContext !== null) syncTracks(trackContext.list, trackContext.entries, trackContext.cardsMap);
 	});
 	// 滚动停在任意小数相位上时重对齐轨道层（rAF 合帧，键值未变时只写 transform）。
+	// 滚动帧走 alignmentOnly 通路：几何量取结果相对轨道层原点，层随内容同步滚动，
+	// 滚动相位不改变任何相对量——只有「层原点的小数相位」需要重算，故滚动期强制
+	// 布局读数由 O(卡片数 + 1) 降到 1（滚动卡顿的主因排查结论）。
 	let trackSyncHandle = null;
 	function queueTrackSync() {
 		if (trackSyncHandle !== null) return;
 		trackSyncHandle = requestAnimationFrame(() => {
 			trackSyncHandle = null;
-			if (trackContext !== null) syncTracks(trackContext.list, trackContext.entries, trackContext.cardsMap);
+			if (trackContext !== null) syncTracks(trackContext.list, trackContext.entries, trackContext.cardsMap, { alignmentOnly: true });
 		});
 	}
 
-	function syncTracks(list, entries, cardsMap) {
+	/** 对齐轨道层到设备像素网格：只需层自身的矩形（1 次读数）+ 上一次的平移量，
+	 *  不触碰任何卡片——滚动帧的唯一几何工作。层原点随内容滚动，平移量取值只
+	 *  依赖「层矩形 − 已应用平移」的小数部分，故与滚动相位无关地恒定可复算。 */
+	function alignTrackLayer(layer) {
+		const rect = layer.getBoundingClientRect();
+		alignTrackLayerFrom(rect.left - layerShiftX, rect.top - layerShiftY, layer);
+	}
+
+	/** 对齐写入：入参为层「未平移原点」的浮点坐标（调用方已完成测量）。 */
+	function alignTrackLayerFrom(baseLeft, baseTop, layer) {
+		const dpr = window.devicePixelRatio || 1;
+		const nextShiftX = Math.round(baseLeft * dpr) / dpr - baseLeft;
+		const nextShiftY = Math.round(baseTop * dpr) / dpr - baseTop;
+		if (nextShiftX === layerShiftX && nextShiftY === layerShiftY) return;
+		layerShiftX = nextShiftX;
+		layerShiftY = nextShiftY;
+		layer.style.transform = `translate(${nextShiftX}px, ${nextShiftY}px)`;
+	}
+
+	// alignmentOnly：滚动帧通路——只重对齐层，不量取卡片、不重算轨道键值。
+	function syncTracks(list, entries, cardsMap, options = {}) {
+		const { alignmentOnly = false } = options;
 		const layer = list.querySelector(".dap-tracks");
 		if (layer === null) return;
 		if (layer !== trackedLayer) {
@@ -6688,6 +8211,11 @@ function apply(ctx) {
 			observedTrackList = list;
 		}
 		trackContext = { list, entries, cardsMap };
+		// 滚动帧：几何量取全部作废（相对量不随滚动相位变化），只保留层重对齐。
+		if (alignmentOnly) {
+			alignTrackLayer(layer);
+			return;
+		}
 		// id 统一按字符串查（buildEntries 的 parentId 已 String 化，而卡片表按原始 id 键控）。
 		const recById = new Map();
 		for (const entry of entries) {
@@ -6717,15 +8245,8 @@ function apply(ctx) {
 		// 设备像素对齐：1px 线段只有落在设备像素边界上才粗细一致。层原点随窗口
 		// 布局/滚动停在任意小数相位（东家验收：竖轨 2px、横线 1px），整体平移层
 		// （≤0.5px，接头随层同步、不可见）使全部线段同相位清晰渲染。写入集中在
-		// 全部测量之后，不产生读写交替。
-		const dpr = window.devicePixelRatio || 1;
-		const nextShiftX = Math.round(baseLeft * dpr) / dpr - baseLeft;
-		const nextShiftY = Math.round(baseTop * dpr) / dpr - baseTop;
-		if (nextShiftX !== layerShiftX || nextShiftY !== layerShiftY) {
-			layerShiftX = nextShiftX;
-			layerShiftY = nextShiftY;
-			layer.style.transform = `translate(${nextShiftX}px, ${nextShiftY}px)`;
-		}
+		// 全部测量之后，不产生读写交替。此处复用层矩形与已应用的平移量，不追加读数。
+		alignTrackLayerFrom(baseLeft, baseTop, layer);
 		for (const [pid, rec] of trackEls) {
 			if (wanted.has(pid)) continue;
 			rec.trackEl.remove();
@@ -6773,6 +8294,10 @@ function apply(ctx) {
 			// 按条目 id 复用，同一 card 元素不会跨 kind 复用——创建时按 entry.kind 一次性
 			// 决定是否绑激活是安全的；若 id 规则变化须同步复核此处。
 			const unbind = entry.kind === "job" ? null : bindCardActivation(el, (sessionId) => {
+				// 「已完成」分区未读/已读（新增功能）：点击条目即已读——把该会话的已读游标
+				// 推进到条目当前进入时刻，条目随即转入已读呈现（nextTurnEnd 前移会重新变未读）。
+				// 只写本地游标，不触碰宿主完成确认账本——打开会话不解除完成提醒（R-01-002/AC-05）。
+				markDoneRead(sessionId);
 				if (typeof ctx.get("uiWorkspace")?.openSession !== "function") return;
 				lastActivatedId = sessionId;
 				// 新激活意图取代一切旧重试链，避免过期链条稍后把当前会话拽回旧目标；
@@ -6814,6 +8339,19 @@ function apply(ctx) {
 		}
 		rec.el.style.marginLeft = `${(entry.depth ?? 0) * INDENT_PX}px`;
 		rec.el.toggleAttribute("data-current", entry.isCurrent);
+		// 打开中提示（东家 2026-10-14 缺陷二「点过的卡一直在闪」）：属性改为渲染期
+		// 单向执法——只属于「此刻确有未收口重试链」的会话，其余一律摘除。
+		// 原先只在 attemptOpen（首次发起）与 cancelOpenRetry 两处挂摘，一旦重试链
+		// 因意外路径提前退出（组件卸载、宿主快照换代、元素被换区/换停靠面重建），
+		// 属性就留在元素上再无人摘，配合 CSS 的 infinite 表现为无界闪烁。
+		// 渲染期写入后，任何路径造成的残留都会在下一轮渲染自愈（CSS 亦已改为限次，
+		// 两道保险互不依赖）。
+		rec.el.toggleAttribute("data-opening", openRetryStates.has(String(entry.id)));
+		// 「已完成」分区未读/已读标识（新增功能）：属性驱动 CSS 的实心/空心状态点，
+		// 语义另经 aria-label 承载（不只靠颜色）。只有落在「已完成」分区的条目携带
+		// unread 字段（渲染层按分区归属注入），其余条目一律摘除该属性。
+		if (entry.unread === undefined) rec.el.removeAttribute("data-unread");
+		else rec.el.toggleAttribute("data-unread", entry.unread === true);
 		rec.el.toggleAttribute("data-awaiting", entry.kind === "awaiting");
 		// 等待三类（R-01-002/AC-08、AC-13，C-043）：blocked=阻塞等待（金色卡面、胶囊+正文闪烁），
 		// done=完成提醒（绿色成功卡面、胶囊+正文闪烁、按钮不闪），error=错误提醒（红色卡面、
@@ -6846,14 +8384,22 @@ function apply(ctx) {
 	/** 原生侧栏切换当前会话后，只把已呈现且未完整可见的当前卡片滚入窗格；降低动效偏好时不平滑。 */
 	function ensureCurrentCardVisible(scroll, currentId) {
 		const id = currentId === null || currentId === undefined ? null : String(currentId);
+		if (id !== lastCurrentSessionId) {
+			lastCurrentSessionId = id;
+			autoScrollSkipIds.clear();
+		}
 		if (id === null || id === "") {
 			autoScrolledCurrentId = null;
 			autoScrolledCurrentCard = null;
 			return;
 		}
-		// 当前会话卡片只有在活动列表中才参与自动定位；完成确认后同一 current
-		// 会话会进入历史区，不能因仍带 data-current 把窗格滚到历史卡片。
-		const card = scroll?.querySelector?.(`.${LIST_CLASS} .${CARD_CLASS}[data-current]`) ?? null;
+		// 自动定位的候选范围是活动区与「已完成」区：完成提醒卡在新增分区后离开了活动区，
+		// 但它与过去「留在活动区的完成提醒」是同一类呈现，必须继续参与定位，否则原生侧栏
+		// 选中该会话后窗格不会滚到它。历史区不参与——确认过的会话不该把窗格拽到历史卡片。
+		// querySelector 按文档序返回首个匹配，活动区在「已完成」区之前，天然优先。
+		const card = scroll?.querySelector?.(
+			`.${LIST_CLASS} .${CARD_CLASS}[data-current], .${DONE_CLASS} .${CARD_CLASS}[data-current]`,
+		) ?? null;
 		if (
 			card === null ||
 			card.dataset.sessionId !== id ||
@@ -6861,6 +8407,9 @@ function apply(ctx) {
 			card.getBoundingClientRect().height <= 0
 		)
 			return;
+		// 刚迁移过区的当前卡不追：它搬进新区是本帧呈现变化的结果，不是用户导航，
+		// 追它会把视口从刚接棒焦点的邻居身上夺走（实测回归）。
+		if (autoScrollSkipIds.has(id)) return;
 		if (autoScrolledCurrentId === id && autoScrolledCurrentCard === card) return;
 		if (scrollCardIntoView(scroll, card, prefersReducedMotion() ? "auto" : "smooth")) {
 			autoScrolledCurrentId = id;
@@ -6984,14 +8533,14 @@ function apply(ctx) {
 	 *  零尺寸（整段隐藏等）不量取：无从滑起的元素不做动画。 */
 	function snapshotShiftRects() {
 		const rects = new Map();
-		for (const pool of [cardsById, recentCardsById]) {
+		for (const pool of [cardsById, doneCardsById, recentCardsById]) {
 			for (const rec of pool.values()) {
 				const rect = rec.el.getBoundingClientRect();
 				if (rect.width > 0 && rect.height > 0) rects.set(rec.el, rect);
 			}
 		}
-		const head = renderedPane?.querySelector(".dap-recent-head") ?? null;
-		if (head !== null) {
+		for (const head of [renderedPane?.querySelector(".dap-recent-head"), renderedPane?.querySelector(".dap-done-head")]) {
+			if (head === null || head === undefined) continue;
 			const rect = head.getBoundingClientRect();
 			if (rect.width > 0 && rect.height > 0) rects.set(head, rect);
 		}
@@ -7045,6 +8594,18 @@ function apply(ctx) {
 
 	function render() {
 		installFrameObserver();
+		// 新增呈现配置每轮渲染前刷新一次：配置通道快照（若有）与 localStorage 记忆
+		// 合并成一份生效值，随后的停靠面切换与最近历史分支都读它。
+		refreshPaneOptions();
+		syncPaneDock();
+		// 右栏 tab 的打开时机（东家 2026-10-14 反馈「点 X 关闭后会自动重开」的修复）：
+		// 只在「本轮停靠面刚从 left 变成 right」时请求打开，绝不每轮重试——用户手动关掉
+		// tab 是明确的意图，插件再打开就是把面板重新推回去。首次装配（启动即右栏）由
+		// syncPaneDock 的初始转换触发；请求失败（尚无在屏会话）由下面这个有界重试兜。
+		if (paneDock === "right" && rightTabNeedsRequest) {
+			rightTabNeedsRequest = false;
+			requestRightTabWithRetry();
+		}
 		const pane = ensurePane();
 		if (pane === null) return;
 		if (pane !== renderedPane) {
@@ -7065,7 +8626,8 @@ function apply(ctx) {
 		applyLayout();
 		const activeList = pane.querySelector(`.${LIST_CLASS}`);
 		const recentSection = pane.querySelector(`.${RECENT_CLASS}`);
-		if (activeList === null || recentSection === null) return;
+		const doneSection = pane.querySelector(`.${DONE_CLASS}`);
+		if (activeList === null || recentSection === null || doneSection === null) return;
 
 		if (e2eListReadyAt === 0 && e2eListDelayMs > 0) e2eListReadyAt = Date.now() + e2eListDelayMs;
 		let snapshot = getSnapshot(sessions, "list");
@@ -7123,6 +8685,18 @@ function apply(ctx) {
 		// 后台任务子卡——剔除 job 子条目后其随钟时长不再注入渲染签名；任务视图订阅
 		// （syncJobsWatches）与母会话 liveJobs（数量注、活动区保留、提醒抑制）不受影响。
 		const active = densityLevel === "full" ? builtActive : builtActive.filter((entry) => entry.kind !== "job");
+		// 「已完成」分区（新增功能）：完成提醒条目从活动区摘出，落到位于「最近历史」之上的
+		// 独立分区。分区只改变呈现分批——active 仍是 buildEntries 的完整派生结果，标题计数
+		// 徽标、可见集合与订阅口径全部沿用 active（与原实现同分子分母）；只有活动区
+		// 实际渲染与状态判定的那几处改用 activeRest。
+		const { done, rest: activeRest } = partitionDoneEntries(active);
+		// 未读/已读标识在同一处注入：游标晚于条目进入时刻即已读。
+		doneEntriesById.clear();
+		for (const entry of done) {
+			const key = String(entry.id);
+			entry.unread = doneEntryUnread(entry, doneReadById.get(key) ?? null);
+			doneEntriesById.set(key, entry);
+		}
 		// 轮内订阅仅对"运行中"会话建立（主会话 + 运行中的子代理），保持在运行中的订阅
 		// 数量 == 运行中会话数量（R-02-004/AC-01）；暂停等待的子代理只显示标题。
 		const runLikeIds = new Set(
@@ -7383,7 +8957,9 @@ function apply(ctx) {
 		// 重试链目标已成为当前会话（他途到达）即取消，避免过期链条拽回会话。
 		cancelStaleOpenRetries({ currentId, activatedId: lastActivatedId });
 
-		const visibleEntries = [...active, ...recent];
+		// 三个分区的条目并集：卡片签名、工作区配色、可见集合与卸载回收共用同一口径；
+		// done 与 active 互斥（由 partitionDoneEntries 保证），不会重复计入。
+		const visibleEntries = [...activeRest, ...done, ...recent];
 		const pulseSurface = desktopQuery.matches
 			? collapsed ? "rail" : "header"
 			: pane.getAttribute("data-open") === "true" ? "drawer" : "toggle";
@@ -7402,24 +8978,50 @@ function apply(ctx) {
 				entry.jobsAgeSec = Math.floor(Date.now() / 1000);
 			}
 		}
+		// 新增功能二/三的开关与折叠态也必须参与去重：这两个字段由段头点击直接翻转
+		// （不经数据变化），不含它们时点击会被下方「签名未变」短路，收起/展开不生效。
+		// 恒计入折叠态（不做「历史为空则忽略」的省略）——折叠标记是与数据无关的
+		// 呈现状态，历史区为空时也必须如实落到 DOM。
+		const recentFoldedNow = paneOptions.recentCollapsible && paneOptions.recentCollapsed;
+		// 原有签名（列表状态、卡片签名、脉冲面、历史时间文案、状态年龄、显示档位）
+		// 逐字不动；新增呈现配置另起一路去重键，两者都未变才跳过本轮渲染。
 		const sig = JSON.stringify([listState, cardSignature(visibleEntries), pulseSurface, recentTimeSignature, awaitAgeSignature, densityLevel]);
-		if (sig === lastSig) return;
+		// 新增呈现配置与「已完成」分区的未读集合另起一路去重键：都不经数据变化，
+		// 不含它们时点击已读 / 段头折叠会被「签名未变」短路。
+		const unreadDoneSig = done.map((entry) => `${entry.id}:${entry.unread === true ? 1 : 0}`).sort();
+		const optionSig = `${paneOptions.recentHidden}|${recentFoldedNow}|${JSON.stringify(unreadDoneSig)}`;
+		if (sig === lastSig && optionSig === lastOptionSig) return;
 		const colorByWorkspace = resolveWorkspaceColors(visibleEntries.map((entry) => entry.workspaceKey));
 		// 跨区迁移（双向，R-01-010/AC-07）：DOM 写入前量取旧卡矩形并克隆 ghost。
+		// 三个分区两两可达：活动 ↔ 历史（既有判定逐字保留）、活动 ↔ 已完成（新增分区）、
+		// 已完成 ↔ 历史（用户点「移入历史」确认完成卡）。新增两条按「完成提醒进入分区」
+		// 与「确认后离开分区」的用户路径成对给出，动画由同一 ghost/FLIP 机制承担。
 		const migrations = [
 			...movedToRecentIds(prevRenderedActiveIds, active, recent).map((id) => ({ id, from: cardsById, to: recentCardsById })),
 			...movedToActiveIds(prevRenderedRecentIds, active, recent).map((id) => ({ id, from: recentCardsById, to: cardsById })),
+			...movedToDoneIds(prevRenderedActiveIds, activeRest, done).map((id) => ({ id, from: cardsById, to: doneCardsById })),
+			...movedToDoneIds(prevRenderedDoneIds, done, activeRest).map((id) => ({ id, from: doneCardsById, to: cardsById })),
+			...movedToDoneIds(prevRenderedDoneIds, done, recent).map((id) => ({ id, from: doneCardsById, to: recentCardsById })),
 		];
-		// 活动卡带焦点迁入历史时，把键盘焦点交给其上一个仍在活动区的卡片；
-		// 若迁移卡已在活动区首位，则退到下一张，避免焦点落到历史区或 body。
+		for (const { id } of migrations) autoScrollSkipIds.add(String(id));
+		// 卡带焦点迁往下一区时，把键盘焦点交给其上一个仍在「活动呈现集合」的卡片；
+		// 若迁移卡已在首位，则退到下一张，避免焦点落到历史区或 body。
+		// 活动呈现集合 = 活动区 + 「已完成」区（都是持焦点卡片所在的区，文档序亦然）——
+		// 完成后卡片整体搬进「已完成」区，让位对象必须同口径扩展，否则活动区一空就没有
+		// 可落焦的邻居（焦点掉到 body）。
 		let focusAfterMigrationId = null;
 		const focusedElement = document.activeElement;
-		const activeIds = new Set(active.map((entry) => String(entry.id)));
+		const focusableEntries = [...activeRest, ...done];
+		const activeIds = new Set(focusableEntries.map((entry) => String(entry.id)));
+		const focusableCards = () => [
+			...activeList.querySelectorAll(`.${CARD_CLASS}`),
+			...doneSection.querySelectorAll(`.${CARD_CLASS}`),
+		];
 		for (const { id, from } of migrations) {
-			if (from !== cardsById) continue;
+			if (from !== cardsById && from !== doneCardsById) continue;
 			const source = from.get(id)?.el;
 			if (source === undefined || !source.contains(focusedElement)) continue;
-			const activeCards = [...activeList.querySelectorAll(`.${CARD_CLASS}`)];
+			const activeCards = focusableCards();
 			const sourceIndex = activeCards.indexOf(source);
 			if (sourceIndex < 0) continue;
 			const target = activeCards
@@ -7441,7 +9043,7 @@ function apply(ctx) {
 		// 重试——瞬时异常自愈，持续异常只滞留故障卡本身（R-01-013/AC-02）。
 		let renderOk = true;
 		const aliveActive = new Set();
-		for (const [index, entry] of active.entries()) {
+		for (const [index, entry] of activeRest.entries()) {
 			try {
 				renderCardIntoList(activeList, entry, cardsById, index, 1, colorByWorkspace);
 			} catch (error) {
@@ -7454,13 +9056,45 @@ function apply(ctx) {
 		}
 		pruneCards(cardsById, aliveActive);
 		// 全部卡片写入后统一测量绘制母会话轨道（单元素连续轨道，零拼接接缝）。
-		syncTracks(activeList, active, cardsById);
-		ensureListStatus(activeList, active.length === 0, listState === "loading" ? "加载中…" : listState === "error" ? "列表加载失败" : "暂无活动会话", { loading: listState === "loading" });
+		syncTracks(activeList, activeRest, cardsById);
+		ensureListStatus(activeList, activeRest.length === 0, listState === "loading" ? "加载中…" : listState === "error" ? "列表加载失败" : "暂无活动会话", { loading: listState === "loading" });
+		// 「已完成」分区：位于活动区与历史区之间（DOM 序为 已完成 → 最近历史）。
+		// 只在有新内容时出现（无完成条目且无卡时整段隐藏），与历史区同一语义。
+		const aliveDone = new Set();
+		for (const [index, entry] of done.entries()) {
+			try {
+				const rec = renderCardIntoList(doneSection, entry, doneCardsById, index, 1, colorByWorkspace);
+				// 历史区同源用法：拿到复用记录以就地调整呈现（此处暂不需要额外写入，
+				// 保留绑定形态与历史区一致，便于后续按条目追加）。
+				void rec;
+			} catch (error) {
+				renderOk = false;
+				logCardRenderError(entry.id, error);
+			}
+			aliveDone.add(entry.id);
+		}
+		pruneCards(doneCardsById, aliveDone);
+		doneSection.hidden = listState === "ready" && done.length === 0;
+		// 停靠面相关的控件态每轮同步一次：右栏停靠时标题行折叠退场（CSS 隐藏提示 +
+		// JS 摘按钮语义），切回左列要恢复；设置弹层里的复选框也随之对齐生效配置。
+		paneControlSync?.();
+		// 段头文字按有无内容写入：整段隐藏时清空文字。paneRegions（e2e）用 textContent
+		// 切分区域，隐藏元素的文字同样计入——「已完成」这一串在空分区时不得出现在
+		// 活动区文案里，否则既有的「确认后活动区不再含『已完成』」断言会误判。
+		const doneHeadText = doneSection.querySelector(".dap-done-head span");
+		if (doneHeadText !== null) {
+			const wantText = doneSection.hidden ? "" : "已完成";
+			if (doneHeadText.textContent !== wantText) doneHeadText.textContent = wantText;
+		}
 		const aliveRecent = new Set();
+		// 新增功能三：收起态只停用卡片呈现，卡片逻辑与容器照旧——分页计数、
+		// 迁移量取与历史卡渲染链路不变，避免折叠与分页两套状态机互相纠缠。
+		const recentFolded = recentFoldedNow;
 		// 历史区容器首个子节点是段头（.dap-recent-head），卡片从 offset 1 开始。
 		for (const [index, entry] of recent.entries()) {
 			try {
-				renderCardIntoList(recentSection, entry, recentCardsById, index, 1, colorByWorkspace);
+				const rec = renderCardIntoList(recentSection, entry, recentCardsById, index, 1, colorByWorkspace);
+				if (rec?.el !== undefined) rec.el.hidden = recentFolded;
 			} catch (error) {
 				renderOk = false;
 				logCardRenderError(entry.id, error);
@@ -7469,7 +9103,21 @@ function apply(ctx) {
 		}
 		pruneCards(recentCardsById, aliveRecent);
 		if (recentSection !== null) {
-			recentSection.hidden = listState === "ready" && recent.length === 0;
+			// 新增功能二：隐藏最近历史——置位时整段（含分隔线与段头）不呈现；
+			// 未置位时保留既有判定（列表就绪且无历史卡则整段隐藏，原行为逐字不变）。
+			recentSection.hidden = paneOptions.recentHidden || (listState === "ready" && recent.length === 0);
+			// 段头承载折叠开关：关闭折叠能力时不可点、无指针光标、不报展开态。
+			recentSection.toggleAttribute("data-recent-folded", recentFolded);
+			const recentHead = recentSection.querySelector(".dap-recent-head");
+			if (recentHead !== null) {
+				const foldable = paneOptions.recentCollapsible;
+				recentHead.toggleAttribute("data-foldable", foldable);
+				recentHead.setAttribute("role", foldable ? "button" : "presentation");
+				recentHead.setAttribute("tabindex", foldable ? "0" : "-1");
+				const expanded = foldable ? (recentFolded ? "false" : "true") : null;
+				if (expanded === null) recentHead.removeAttribute("aria-expanded");
+				else recentHead.setAttribute("aria-expanded", expanded);
+			}
 			ensureListStatus(recentSection, listState !== "ready" && recent.length === 0, listState === "loading" ? "加载中…" : "列表加载失败", { loading: listState === "loading" });
 			const recentMore = recentSection.querySelector(".dap-recent-more");
 			if (recentMore !== null) {
@@ -7479,8 +9127,75 @@ function apply(ctx) {
 		}
 		runMoveGhosts(movePlans);
 		if (shiftRects !== null) runShiftAnimations(shiftRects);
-		ensureCurrentCardVisible(pane.querySelector(".dap-scroll"), currentIdOf(snapshot));
-		if (focusAfterMigrationId !== null) cardsById.get(focusAfterMigrationId)?.el.focus();
+		const scrollEl = pane.querySelector(".dap-scroll");
+		if (focusAfterMigrationId !== null) {
+			const targetCard = (cardsById.get(focusAfterMigrationId) ?? doneCardsById.get(focusAfterMigrationId))?.el ?? null;
+			// 聚焦即让浏览器把目标带进视口（不传 preventScroll）——与既有行为一致：
+			// 焦点从被移除的旧卡交棒时，本来就是这次隐式滚动在保证键盘用户看得见焦点。
+			targetCard?.focus();
+			// 焦点落位后由本插件显式把目标滚入视口：焦点从 DOM 中移除的旧卡交棒时
+			// 不触发浏览器默认滚动，不补滚会让接收焦点的卡片停在视口外。
+			if (targetCard !== null) {
+				// 让位定位：跨区迁移后布局要数百毫秒才收敛（卡片搬进搬出、空态占位挂载、
+				// 迁移动画收口，实测焦点卡在首帧可见、约 400ms 后已滑出视口 758px）。
+				// 故用「墙钟截止 + 逐帧复核」：窗内只要不完全可见就重定位，超窗即止。
+				// 只操作窗格自己的滚动容器（scrollCardIntoView），不波及外层滚动。
+				focusHandoffId = String(focusAfterMigrationId);
+				focusHandoffUntil = Date.now() + FOCUS_HANDOFF_MS;
+				focusHandoffActive = true;
+				const settleFocusTarget = () => {
+					if (disposed || !targetCard.isConnected) {
+						focusHandoffActive = false;
+						return;
+					}
+					const viewport = scrollEl.getBoundingClientRect();
+					const rect = targetCard.getBoundingClientRect();
+					const fullyVisible = rect.top >= viewport.top - 1 && rect.bottom <= viewport.bottom + 1;
+					if (!fullyVisible) scrollCardIntoView(scrollEl, targetCard, "auto");
+					if (Date.now() >= focusHandoffUntil) {
+						// 收敛窗结束：释放自动定位并重置其记账，让下一次数据变化按新位置判定。
+						focusHandoffActive = false;
+						focusHandoffId = null;
+						focusHandoffUntil = 0;
+						autoScrolledCurrentId = null;
+						autoScrolledCurrentCard = null;
+						queueSync();
+						return;
+					}
+					requestAnimationFrame(settleFocusTarget);
+				};
+				settleFocusTarget();
+			}
+		}
+		// 迁移帧不做自动定位：本帧的滚动位置由焦点让位（上一段）负责，两者同时写入会
+		// 互相推翻——自动定位把刚接棒的邻居推出视口，键盘用户看不到焦点（实测回归）。
+		// 让位窗内每次渲染都把焦点卡滚回视口（布局仍在变化），自动定位整体让位。
+		if (focusHandoffActive) {
+			if (Date.now() > focusHandoffUntil || focusHandoffId === null) {
+				focusHandoffActive = false;
+				focusHandoffId = null;
+				focusHandoffUntil = 0;
+				// 释放后重置自动定位记账，让下一次数据变化按新位置重新判定。
+				autoScrolledCurrentId = null;
+				autoScrolledCurrentCard = null;
+				queueSync();
+			} else {
+				const handoffCard = (cardsById.get(focusHandoffId) ?? doneCardsById.get(focusHandoffId))?.el ?? null;
+				if (handoffCard === null || !handoffCard.isConnected) {
+					focusHandoffActive = false;
+					focusHandoffId = null;
+					focusHandoffUntil = 0;
+				} else {
+					const viewport = scrollEl.getBoundingClientRect();
+					const rect = handoffCard.getBoundingClientRect();
+					if (rect.top < viewport.top - 1 || rect.bottom > viewport.bottom + 1) {
+						handoffCard.scrollIntoView({ block: "nearest", behavior: "auto" });
+					}
+				}
+			}
+		} else {
+			ensureCurrentCardVisible(scrollEl, currentIdOf(snapshot));
+		}
 		// 区域已有条目但列表仍在途时，在区头部显示行内加载指示（R-01-014/AC-01）。
 		const headerEl = pane.querySelector(".dap-titlebar");
 		const recentHeadEl = recentSection?.querySelector(".dap-recent-head") ?? null;
@@ -7505,6 +9220,11 @@ function apply(ctx) {
 		const { waiting, blocked, total } = awaitBadgeStats(active);
 		const badge = countBadgeState(listState, waiting, total, blocked);
 		const badgeTone = awaitBadgeTone(active);
+		// 宿主侧栏三状态角标（新增功能）：计数与分组明细在同一处刷新，快照变化驱动
+		// glyph 重渲染；计数增加的那一帧另挂一次强调动画。
+		syncStatusBadges(active, done);
+		// 弹窗开着时跟随快照重绘（计数/条目随会话状态变化，用户不必关掉重开）。
+		if (badgeModalOpen) renderBadgeModal();
 		for (const el of [count, railCount])
 			if (el !== null) {
 				setCountBadgeContent(el, badge);
@@ -7546,8 +9266,10 @@ function apply(ctx) {
 		// 同步重试的机会，避免故障被签名吞掉后卡片永久滞留（R-01-013/AC-02）。
 		if (renderOk) {
 			lastSig = sig;
+			lastOptionSig = optionSig;
 			pulseSignature = nextPulseSignature;
-			prevRenderedActiveIds = new Set(active.map((entry) => String(entry.id)));
+			prevRenderedActiveIds = new Set(activeRest.map((entry) => String(entry.id)));
+			prevRenderedDoneIds = new Set(done.map((entry) => String(entry.id)));
 			prevRenderedRecentIds = new Set(recent.map((entry) => String(entry.id)));
 		}
 		// 锚定补偿（R-01-021/AC-01）：档位切换的渲染落地后量测当前选中卡的新位置并
@@ -7579,7 +9301,11 @@ function apply(ctx) {
 	}
 
 	// ---- 打开会话（dsh 0.2.0 经 uiWorkspace.openSession 导航，currentId 驱动重试链） ----
-	const MAX_OPEN_ATTEMPTS = 60;
+	// 打开重试链上限（东家 2026-10-14 反馈「点击后一直闪烁」）：原为 60 次 × 500ms
+	// = 30 秒，期间 data-opening（0.9s 无限闪烁动画）一直挂在卡片上；用户看到的就是
+	// 「点过的卡一直在闪」。改为 6 次 × 500ms 约 2.5 秒——足够覆盖宿主切换会话的
+	// 常规延迟与右栏/移动端的异步重建，又不会让失败链长时间闪下去。
+	const MAX_OPEN_ATTEMPTS = 6;
 	function cardElFor(sessionId) {
 		return document.querySelector(`[${PANE_ATTR}] [data-session-id="${escapeCssString(sessionId)}"]`);
 	}
@@ -7642,8 +9368,10 @@ function apply(ctx) {
 			cancelOpenRetry(sessionId);
 			return;
 		}
+		// data-opening 只在「首次发起」时挂上：重试期间重复挂/摘会让闪烁动画反复重启，
+		// 视觉上更像故障。重试沿用同一个属性，直到收链（到达 / 取消 / 超限）才摘除。
 		const el = cardElFor(sessionId);
-		if (el !== null) el.setAttribute("data-opening", "");
+		if (el !== null && attempt === 0) el.setAttribute("data-opening", "");
 
 		// dsh 0.2.0（T-170）：导航经 uiWorkspace.openSession（内部以 source "mainView"
 		// retain 并驱动外壳 selection，替代已删除的 sessions.open）。发起不等于到达：
@@ -7770,6 +9498,19 @@ function apply(ctx) {
 	desktopQuery.addEventListener("change", onResize);
 
 	installServiceSubscriptions();
+	// 可选接线：宿主设置通道（三项新增配置的第一优先来源）与宿主右侧栏 tab
+	// （面板位置=right 的呈现载体）。两者都不进 inject，缺席即整段跳过；
+	// 右栏接线前置 require("react") 探测，运行时缺失时退化为仅左列呈现。
+	try {
+		connectHostConfig();
+		rightReact();
+		connectSidebarRight();
+		// 宿主侧栏三状态角标（入口行 + 面板正文）：同样软接线，services 缺席即跳过。
+		connectStatusBadges();
+	} catch {
+		rightTabDisposer = null;
+		rightSlotDisposer = null;
+	}
 	queueSync();
 
 	const cleanup = () => {
@@ -7790,6 +9531,37 @@ function apply(ctx) {
 		window.removeEventListener("pageshow", onPageShow);
 		document.removeEventListener("visibilitychange", onSyncVisibilityResume);
 		window.removeEventListener("pageshow", onSyncPageShow);
+		// 可选接线回收：配置控制器订阅、右栏 tab 类型与正文席位、右栏挂载点引用。
+		try {
+			configUnsubscribe?.();
+		} catch {}
+		configUnsubscribe = null;
+		configController = null;
+		hostConfigValue = null;
+		try {
+			rightSlotDisposer?.();
+		} catch {}
+		rightSlotDisposer = null;
+		try {
+			rightTabDisposer?.();
+		} catch {}
+		rightTabDisposer = null;
+		sidebarRightHost = null;
+		// 宿主侧栏角标入口行随卸载注销（面板正文注册同样由该 disposer 一并回收）。
+		try {
+			badgePanelDisposer?.();
+		} catch {}
+		badgePanelDisposer = null;
+		lastBadgeCounts = null;
+		// 弹窗回收：摘文档级监听、关闭弹窗并移除其 DOM。入口行的 click 监听挂在
+		// 宿主行按钮上，由注册它的 React effect 卸载时自行清理（badgePanelDisposer
+		// 一注销，宿主即卸载 glyph 组件，effect 清理随之执行）。
+		document.removeEventListener("keydown", onBadgeModalKeydown, true);
+		setBadgeModalOpen(false);
+		badgeModalEl?.remove();
+		badgeModalEl = null;
+		badgeModalBody = null;
+		badgeModalReturnFocus = null;
 		completeAcksById.clear();
 		busyById.clear();
 		busyRequestedIds.clear();
@@ -7825,8 +9597,12 @@ function apply(ctx) {
 		loadQueue.length = 0;
 		loadInflight = 0;
 		for (const rec of cardsById.values()) rec.unbind?.();
+		for (const rec of doneCardsById.values()) rec.unbind?.();
 		for (const rec of recentCardsById.values()) rec.unbind?.();
 		cardsById.clear();
+		doneCardsById.clear();
+		prevRenderedDoneIds = new Set();
+		doneEntriesById.clear();
 		recentCardsById.clear();
 		for (const sessionId of openRetryStates.keys()) cancelOpenRetry(sessionId);
 		openRetryStates.clear();

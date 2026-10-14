@@ -5,3 +5,8 @@ node_modules/
 e2e/fail-*.png
 .cache/
 tools/__pycache__/
+.dsh-auto-pass
+.pnpm-store
+.e2e
+.githooks
+.github

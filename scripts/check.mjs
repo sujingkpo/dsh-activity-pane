@@ -3882,14 +3882,16 @@ assert.ok(
 	"列表 phase、历史时间文案、等待卡状态年龄与显示档位必须参与结构化渲染签名，空列表不得冻结在加载/失败状态（T-087），档位切换触发时间线按新档位重建（R-01-021/AC-08），状态年龄随分钟级时钟重绘（R-01-002/AC-14）",
 );
 assert.ok(
-	clientSource.includes("scroll?.querySelector?.(`.${LIST_CLASS} .${CARD_CLASS}[data-current]`)") &&
+	clientSource.includes("scroll?.querySelector?.(") &&
+		clientSource.includes("`.${LIST_CLASS} .${CARD_CLASS}[data-current], .${DONE_CLASS} .${CARD_CLASS}[data-current]`") &&
 		!clientSource.includes("scroll?.querySelector?.(`.${CARD_CLASS}[data-current]`)"),
-	"当前卡片自动滚动仅定位活动列表，完成卡迁入历史后不追随历史区（R-01-006/AC-02）",
+	"当前卡片自动滚动只定位活动列表与「已完成」分区，完成卡迁入历史后不追随历史区（R-01-006/AC-02）",
 );
 assert.ok(
 	clientSource.includes("source.contains(focusedElement)") &&
-		clientSource.includes("cardsById.get(focusAfterMigrationId)?.el.focus()"),
-	"活动卡迁移时将已有键盘焦点交给仍在活动区的相邻卡片（R-01-005/AC-01）",
+		clientSource.includes("(cardsById.get(focusAfterMigrationId) ?? doneCardsById.get(focusAfterMigrationId))?.el") &&
+		clientSource.includes("targetCard?.focus();"),
+	"活动卡迁移时将已有键盘焦点交给仍在活动区或「已完成」分区的相邻卡片（R-01-005/AC-01）",
 );
 // R-01-013/AC-02 回归：卡片标题必须随快照更新——单卡渲染异常不得冻结其余卡片
 // （此前渲染签名先于卡片循环提交且无异常隔离，故障卡及其后全部卡片永久滞留旧标题，
@@ -3900,11 +3902,38 @@ assert.ok(
 );
 assert.equal(
 	(clientSource.match(/logCardRenderError\(entry\.id, error\)/g) ?? []).length,
-	2,
-	"活动区与历史区卡片渲染均须逐卡 try/catch 异常隔离并上报",
+	3,
+	"活动区、已完成区与历史区卡片渲染均须逐卡 try/catch 异常隔离并上报",
 );
 assert.ok(bundle.includes("openRetryStates"), "跳转重试链必须可合并并清理");
 assert.ok(bundle.includes("shouldCancelOpenRetry"), "打开重试链经统一取消判定防止过期链条拽回会话");
+// 「打开中」提示的收口纪律（东家 2026-10-14 缺陷：「点过的卡一直在闪」）：动画限次 +
+// 渲染期单向执法。两道保险互不依赖——限次保证动画本身到点即止（不依赖任何路径摘属性），
+// 执法保证属性残留会在下一轮渲染自愈（不依赖动画结束）。任一道回归都会让闪烁复活。
+assert.ok(
+	bundle.includes("animation: dap-opening 0.9s ease-in-out 3;") && !/animation: dap-opening[^;]*infinite/.test(bundle),
+	"「打开中」提示为限次动画（3 次），不得使用 infinite（无界闪烁的直接成因）",
+);
+assert.ok(
+	clientSource.includes('rec.el.toggleAttribute("data-opening", openRetryStates.has(String(entry.id)));'),
+	"「打开中」属性在渲染期单向执法：只属于确有未收口重试链的会话，残留由下一轮渲染自愈",
+);
+// 打开重试链重发导航时不重复挂属性：反复挂/摘会让 CSS 动画反复重启，视觉上更像故障。
+assert.ok(
+	clientSource.includes("if (el !== null && attempt === 0) el.setAttribute(\"data-opening\", \"\");") &&
+		!clientSource.includes("if (el !== null) el.setAttribute(\"data-opening\", \"\");"),
+	"「打开中」属性只在首次发起时挂上，重试期不重复挂摘（避免动画反复重启）",
+);
+// 弹窗的键盘收口：Esc/Tab 只在弹窗打开期间拦截——常驻监听会把宿主的 Escape/Tab 一并吞掉。
+assert.ok(
+	clientSource.includes("function onBadgeModalKeydown(event) {\n\t\tif (!badgeModalOpen) return;"),
+	"弹窗键盘监听先判打开态，关闭时不得拦截宿主的 Escape/Tab 行为",
+);
+// 本仓库明令禁止在 document 上拦点击（宿主侧栏行由原生 click 监听在行按钮上承载）。
+assert.ok(
+	!clientSource.includes('document.addEventListener("click"'),
+	"不得在 document 上拦截点击：入口行交互由行按钮自身的原生 click 监听承载",
+);
 assert.ok(bundle.includes("escapeCssString"), "卡片定位选择器经统一转义");
 assert.ok(!clientSource.includes("value.partial"), "history 响应不读取不存在的 partial 字段（宿主契约为 events/hasMore/projections）");
 assert.ok(!clientSource.includes("timelineUserMessages"), "不重新引入 C-007/C-008 否决的 timelineUserMessages 投影");
@@ -3993,7 +4022,7 @@ assert.ok(bundle.includes('[data-dsh-activity-pane] .dap-conn-track {'), "每个
 assert.ok(bundle.includes('trackEl.className = "dap-conn-track"'), "轨道元素使用独立类名");
 assert.ok(bundle.includes('class="dap-tracks" aria-hidden="true"'), "轨道层为纯装饰、不进可访问性树");
 assert.ok(
-	bundle.includes("syncTracks(activeList, active, cardsById)"),
+	bundle.includes("syncTracks(activeList, activeRest, cardsById)"),
 	"全部卡片写入后统一测量绘制轨道（读写分离，避免布局抖动）",
 );
 assert.ok(
@@ -4867,9 +4896,9 @@ assert.ok(
 	"按钮底色为不透明纯色（非 color-mix 半透明，R-01-018/AC-05）",
 );
 assert.ok(
-	bundle.includes("body:not([data-ds-dark-theme]) [data-dsh-activity-pane] .dap-top,\nbody:not([data-ds-dark-theme]) [data-dsh-activity-pane] .dap-density,\nbody:not([data-ds-dark-theme]) [data-dsh-activity-pane] .dap-repo {\n  background: var(--dsw-alias-bg-layer-2, #ffffff);")
-		&& bundle.includes("body:not([data-ds-dark-theme]) [data-dsh-activity-pane] .dap-top,\nbody:not([data-ds-dark-theme]) [data-dsh-activity-pane] .dap-density {\n  border-color: var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.1));"),
-	"浅色主题底色取外壳 layer-2 别名（同样不透明；仓库入口无描边只并入底色组，描边别名仅留带边框按钮，R-01-018/AC-05、R-01-022/AC-01）",
+	bundle.includes("body:not([data-ds-dark-theme]) [data-dsh-activity-pane] .dap-top,\nbody:not([data-ds-dark-theme]) [data-dsh-activity-pane] .dap-density,\nbody:not([data-ds-dark-theme]) [data-dsh-activity-pane] .dap-settings,\nbody:not([data-ds-dark-theme]) [data-dsh-activity-pane] .dap-dock,\nbody:not([data-ds-dark-theme]) [data-dsh-activity-pane] .dap-repo {\n  background: var(--dsw-alias-bg-layer-2, #ffffff);")
+		&& bundle.includes("body:not([data-ds-dark-theme]) [data-dsh-activity-pane] .dap-settings,\nbody:not([data-ds-dark-theme]) [data-dsh-activity-pane] .dap-dock {\n  border-color: var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.1));"),
+	"浅色主题底色取外壳 layer-2 别名（同样不透明；仓库入口无描边只并入底色组，描边别名覆盖全部带边框按钮，含新增的设置/位置入口，R-01-018/AC-05、R-01-022/AC-01）",
 );
 assert.ok(
 	bundle.includes("[data-dsh-activity-pane] .dap-top[hidden] { display: none; }"),

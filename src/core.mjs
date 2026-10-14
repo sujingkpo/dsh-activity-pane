@@ -1327,6 +1327,54 @@ export function awaitBadgeStats(entries) {
  *  awaitBadgeTone（错误 > 阻塞 > 完成，红/金/绿）与脉冲门控同一信号：任一等待行动
  *  （阻塞等待、完成提醒或错误提醒）即脉冲（R-01-002/AC-06，C-037、C-043）。
  *  blocked 入参只用于 aria 文案的计数说明，不再驱动门控。错误轴不算在途，维持计数呈现。 */
+/** 三状态角标计数（新增功能：工作区上方「运行中 / 需要交互 / 已完成」三个角标）：
+ *  只统计主会话条目（子代理与后台任务子条目不计入，与 awaitBadgeStats 同口径）——
+ *  运行中 = kind 'running'；需要交互 = kind 'awaiting' 且 waitClass 'blocked'
+ *  （待确认/待审查/待回复，不含完成提醒与错误提醒）；已完成 = kind 'awaiting'
+ *  且 waitClass 'done'（回合结束且宿主持久态未被标记已读）。
+ *  空/非法输入返回全 0，供「0 值仍常显并置灰」的角标呈现直接使用。 */
+export function statusBadges(entries) {
+	let running = 0;
+	let interaction = 0;
+	let completed = 0;
+	for (const entry of Array.isArray(entries) ? entries : []) {
+		if (entry?.kind === "running") {
+			running += 1;
+			continue;
+		}
+		if (entry?.kind !== "awaiting") continue;
+		if (entry.waitClass === "blocked") interaction += 1;
+		else if (entry.waitClass === "done") completed += 1;
+	}
+	return { running, interaction, completed };
+}
+
+/** 「已完成」分区拆分：把完成提醒条目（kind 'awaiting' 且 waitClass 'done'）从活动条目
+ *  里摘出，其余保持原顺序。分区是「呈现分批」，不改动 buildEntries 的派生口径——
+ *  调用方用拆出后的整体计算标题计数徽标，得到与原实现一致的分母。
+ *  未传入/非法输入返回 { done: [], rest: [] }。 */
+export function partitionDoneEntries(entries) {
+	const done = [];
+	const rest = [];
+	for (const entry of Array.isArray(entries) ? entries : []) {
+		if (entry?.kind === "awaiting" && entry.waitClass === "done") done.push(entry);
+		else rest.push(entry);
+	}
+	return { done, rest };
+}
+
+/** 「已完成」分区条目的未读判定（点击条目即已读）：readAt 为该会话已读时的
+ *  lastTurnEnd 游标，条目的进入时刻（stateAt = 最近一次回合结束登记时刻）晚于游标
+ *  即为未读——新回合结束会推进 stateAt，旧游标自动失效，条目重新变未读。
+ *  进入时刻不可得（未登记 turn/end）时保守判为未读，不冒充已读。 */
+export function doneEntryUnread(entry, readAt) {
+	const entered = Number(entry?.stateAt);
+	const seen = Number(readAt);
+	if (!Number.isFinite(entered)) return true;
+	if (!Number.isFinite(seen)) return true;
+	return entered > seen;
+}
+
 export function countBadgeState(listState, waiting, total, blocked = 0) {
 	if (listState === "loading") return { mode: "loading", text: "", ariaText: "活动会话计数加载中", tip: "", awaiting: false };
 	const awaiting = waiting > 0;
@@ -2131,6 +2179,25 @@ export function movedToActiveIds(prevRecentIds, active, recent) {
 		if (!recentIds.has(id) && activeIds.has(id)) moved.push(id);
 	}
 	return moved;
+}
+
+/** 通用跨区迁移检测：prevIds 中的条目在本帧离开 from 区且出现于 to 区即判定为一次
+ *  迁移。三个分区（活动/已完成/历史）两两之间复用同一实现，避免每对再写一份镜像。
+ *  from/to 都是条目数组；两方都用 String(id) 归一。彻底消失（归档、不再被列出）不判定。 */
+export function movedBetweenIds(prevIds, from, to) {
+	if (!(prevIds instanceof Set)) return [];
+	const fromIds = new Set((Array.isArray(from) ? from : []).map((entry) => String(entry?.id)));
+	const toIds = new Set((Array.isArray(to) ? to : []).map((entry) => String(entry?.id)));
+	const moved = [];
+	for (const id of prevIds) {
+		if (!fromIds.has(id) && toIds.has(id)) moved.push(id);
+	}
+	return moved;
+}
+
+/** 「已完成」分区迁移检测别名：语义与 movedBetweenIds 相同，命名让调用点自述意图。 */
+export function movedToDoneIds(prevIds, from, to) {
+	return movedBetweenIds(prevIds, from, to);
 }
 
 /** 从 history 事件提取最后回合结束时刻（最后一条 `turn/end` 的有效 time）：
