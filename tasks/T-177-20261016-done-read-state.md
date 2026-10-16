@@ -6,7 +6,7 @@ id: T-177
 
 # T-177 完成提醒的已读/未读标识与「已读即停闪」
 
-状态: active
+状态: completed
 关联: R-01-026
 风险等级: standard
 
@@ -108,4 +108,4 @@ id: T-177
 - 实现: `src/core.mjs` 新增 `ROUND_DONE_LABELS`/`doneWaitLabel` 与 `classifyActiveEntries(entries, doneReadById)` 的已读游标入参；`src/client.mjs` 六处——①窗格胶囊文案接 `doneWaitLabel`、无障碍名称在未读时追加「未读」；②`.dap-done` 分区的已读/未读四通道 CSS（实心点+光晕/空心点、左缘 `::before` 绿条、标题字重、整卡 0.72 弱化）与末行脉冲两支选择器门控；③弹窗条目新增常驻 `.dap-modal-item-state` 与 `data-unread` 分支、非完成组摘属性；④glyph 的 `data-badge-unread` 静态提示环与「（n 个未读）」读数；⑤`openSessionFromBadge` 先写已读游标；⑥`advanceDoneReadCursor`/`markAllDoneRead` 与两处「全部已读」入口（窗格已完成分区段头 + 弹窗已完成组段头，按未读数显隐）；⑦`ackAllDone` 与两处「全部移入历史」入口（同两处段头，按分区条数显隐，逐条复用 `ackCompletion`）。`scripts/check.mjs` 另修 CRLF 归一（`clientSource`/`bundle`）。
 - 测试: `node scripts/check.mjs` 全绿（含本次新增的脉冲门控、`doneWaitLabel` 单点、已读判定单点、未读角标、弹窗分组隔离、一键已读与全部移入历史六组契约断言）；`e2e/specs/done-read-state.mjs` PASS（未读呈现 → 点击转已读并跨 ≥2 周期复检停闪 → 阻塞卡不受门控 → 弹窗两态与分组隔离 → 未读环与读数 → 弹窗点击写游标 → 两处一键已读入口显隐与批量已读 → 两处全部移入历史入口显隐与分区清空）；回归 `badge-surfaces`、`badge-independence`、`badge-interaction-pulse`、`completion-sync`、`compact-density`、`modal-stable-refresh`、`long-list`、`density-resource` 全部 PASS；`background-jobs` 为基线既有失败（改动前同样超时，已对照确认）。
 - SOLUTION 对照: 与 SOLUTION「宿主侧栏角标」新增的判定单点/已读写入单一入口/未读角标提示/一键已读/一键移入历史、「窗格渲染器」新增的完成提醒已读/未读呈现条目一致；PRD R-01-026/AC-09～AC-14 与 R-01-002/AC-08、AC-09 的分句均有对应实现与测试锚点。
-- commit: 待填
+- commit: 11918be ✨ 改进(activity-pane): 完成提醒补齐已读未读标识并支持批量已读与批量移入历史
