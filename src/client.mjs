@@ -58,6 +58,12 @@ const CLOCK_MS = 1000;
 const SYNC_MIN_INTERVAL_MS = 100;
 /** 历史卡相对时间与等待卡状态年龄的刷新周期；无需每秒重绘整列。 */
 const RECENT_TIME_REFRESH_MS = 60_000;
+/** 角标弹窗的三组固定构成（顺序即文档序，段头文案与骨架、渲染共用同一处口径）。 */
+const BADGE_MODAL_GROUPS = [
+	["running", "运行中"],
+	["interaction", "需要交互"],
+	["completed", "已完成"],
+];
 /** 冷数据读取并发池上限：慢网下避免几十张卡片的 models/history 一次性挤占通道。 */
 const LOAD_CONCURRENCY = 3;
 /** 历史分页每批数量；后续批次只由底部按钮显式加载。 */
@@ -150,6 +156,36 @@ const CSS = `
 .dap-badge-glyph i[data-tone="running"][data-on="true"] { background: #65a0ff; }
 .dap-badge-glyph i[data-tone="interaction"][data-on="true"] { background: #d8a12a; }
 .dap-badge-glyph i[data-tone="completed"][data-on="true"] { background: #3fbf7f; }
+/* 「需要交互」持续强调（R-01-026/AC-08）：只要还有待处理的交互（计数 > 0），角标就一直
+   金色呼吸并向外扩环，直到该计数归零（用户处理完成）。待处理项要求用户立刻行动，一次性
+   提示到点即灭会让仍未处理的交互重新静默下去，所以这里用无界动画。
+   与「新增」一次性强调（data-badge-hit / data-badge-alert，见下）共用 filter/transform：
+   后者在源码中位于本节之后，属性同现时按同权重后者胜出（alert 变体还多一个属性、
+   权重更高），故其播放期间自动接管本常闪；计时器收口摘属性后自然落回——不需要 JS 在
+   两边做互斥。 */
+.dap-badge-glyph[data-badge-awaiting] {
+  color: #ffca4a;
+  animation: dap-badge-await-pulse 1.6s ease-in-out infinite;
+}
+@keyframes dap-badge-await-pulse {
+  0%, 100% { filter: brightness(1); transform: scale(1); }
+  50% { filter: brightness(1.9); transform: scale(1.28); }
+}
+.dap-badge-glyph[data-badge-awaiting]::after {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  border-radius: 999px;
+  pointer-events: none;
+  border: 2px solid currentColor;
+  animation: dap-badge-halo 1.6s ease-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  /* 「需要交互」常闪只关动效、保留金色状态色：状态反馈不能随动效一起消失
+     （与等待胶囊 dap-await-pulse 同一条口径）。 */
+  .dap-badge-glyph[data-badge-awaiting],
+  .dap-badge-glyph[data-badge-awaiting]::after { animation: none; }
+}
 /* 「新增」强调：计数增加的那一次播放一次，动画结束后由 JS 摘属性。
    东家反馈「要明显」：改成 1.2s × 3 次的高对比强调——亮度拉到 2.4、放大到 1.45，
    并在下方叠一圈放大淡出的光环（::after 只做视觉，不占布局）。
@@ -289,6 +325,10 @@ const CSS = `
 .dap-modal-group[data-tone="interaction"] .dap-modal-group-count { color: #b8831a; }
 .dap-modal-group[data-tone="completed"] .dap-modal-group-count { color: #2f9e6a; }
 .dap-modal-empty { padding: 2px 2px 0; font-size: 12px; line-height: 1.5; color: var(--dsw-alias-label-tertiary, color-mix(in srgb, currentColor 38%, transparent)); }
+/* 条目容器：与「段头 → 首条」的 4px 间距同值，接住原先直接挂在分组上的行间距。
+   空组时整体隐藏（display:flex 会盖掉 UA 的 [hidden] 规则，故显式声明）。 */
+.dap-modal-group-items { display: flex; flex-direction: column; gap: 4px; }
+.dap-modal-group-items[hidden] { display: none; }
 .dap-modal-item {
   display: flex; align-items: center; gap: 9px;
   width: 100%; padding: 8px 10px;
@@ -2306,6 +2346,9 @@ function apply(ctx) {
 					title: label,
 					role: "img",
 					ref: glyphRef,
+					// 「需要交互」常闪开关：声明式给出，随宿主重渲染与 React 重挂都自动跟随，
+					// 不靠命令式挂属性（重挂会连同属性一起丢）。计数归零即摘，动画随之停止。
+					"data-badge-awaiting": counts.interaction > 0 ? "true" : undefined,
 				},
 				dots.map(([tone, value]) => react.createElement("i", { key: tone, "data-tone": tone, "data-on": value > 0 ? "true" : "false" })),
 			);
@@ -2351,12 +2394,37 @@ function apply(ctx) {
 	}
 
 	// ---- 三状态角标弹窗（东家 2026-10-14 反馈：点侧栏入口要弹窗打开，而不是切主面板）----
-	/** 弹窗根遮罩元素与内容容器（首次打开时惰性创建，卸载时移除）。 */
+	/** 弹窗根遮罩元素（首次打开时惰性创建，卸载时移除）。 */
 	let badgeModalEl = null;
-	let badgeModalBody = null;
 	let badgeModalOpen = false;
 	/** 打开前的焦点：关闭时归还，键盘用户不丢位置。 */
 	let badgeModalReturnFocus = null;
+	/** 弹窗三组的常驻骨架记录：`tone → { count, empty, items, byId }`；非 null 即表示
+	 *  弹窗骨架已建好（renderBadgeModal 的就位判据）。骨架只在 ensureBadgeModal 时建一次，
+	 *  此后每轮渲染只改文案与顺序（见 renderBadgeModal）。 */
+	let badgeModalGroups = null;
+
+	/** 弹窗条目行（复用单元）：状态色点 + 标题 + 工作区后缀 + 行尾跳转提示。
+	 *  子节点一次建成后常驻——工作区后缀用文本 + hidden 表达有无，避免增删节点。
+	 *  @param {string} tone 条目所属分组（running / interaction / completed）。
+	 *  @returns {{ el: HTMLButtonElement, title: HTMLElement, ws: HTMLElement }} */
+	function makeBadgeModalItem(tone) {
+		const item = document.createElement("button");
+		item.type = "button";
+		item.className = "dap-modal-item";
+		item.dataset.tone = tone;
+		item.append(makeEl("span", "dap-modal-dot"));
+		const text = makeEl("span", "dap-modal-item-text");
+		const name = makeEl("span", "dap-modal-item-title");
+		const ws = makeEl("span", "dap-modal-item-ws");
+		ws.hidden = true;
+		text.append(name, ws);
+		// 行尾跳转提示（悬停/聚焦显现）；纯装饰，语义已由条目按钮的可访问名承载。
+		const go = makeEl("span", "dap-modal-item-go");
+		go.append(createGoIcon());
+		item.append(text, go);
+		return { el: item, title: name, ws };
+	}
 
 	/** 惰性创建弹窗骨架：遮罩 + 居中对话框（标题行带关闭按钮）。 */
 	function ensureBadgeModal() {
@@ -2378,11 +2446,33 @@ function apply(ctx) {
 		close.append(createCloseIcon());
 		head.append(title, close);
 		const body = makeEl("div", "dap-modal-body");
+		// 三组骨架在这里一次建成并常驻：段头、计数、空态与条目容器。
+		// 条目节点随之跨轮复用（renderBadgeModal 只改文案与顺序），因此内容刷新
+		// 不再销毁指针下的行——悬停态与点击时序都不被整表重建打断。
+		const groups = new Map();
+		for (const [tone, label] of BADGE_MODAL_GROUPS) {
+			const group = makeEl("div", "dap-modal-group");
+			group.dataset.tone = tone;
+			const groupHead = makeEl("div", "dap-modal-group-head");
+			const groupTitle = makeEl("span", "dap-modal-group-title");
+			groupTitle.textContent = label;
+			const count = makeEl("span", "dap-modal-group-count");
+			const empty = makeEl("div", "dap-modal-empty");
+			empty.textContent = "暂无";
+			empty.hidden = true;
+			const items = makeEl("div", "dap-modal-group-items");
+			items.hidden = true;
+			groupHead.append(groupTitle, count);
+			group.append(groupHead, empty, items);
+			// byId 记录该组当前持有的条目节点（entry.id → 复用单元），跨轮复用与回收的依据。
+			groups.set(tone, { count, empty, items, byId: new Map() });
+			body.append(group);
+		}
 		dialog.append(head, body);
 		backdrop.append(dialog);
 		document.body.append(backdrop);
 		badgeModalEl = backdrop;
-		badgeModalBody = body;
+		badgeModalGroups = groups;
 		close.addEventListener("click", () => setBadgeModalOpen(false));
 		backdrop.addEventListener("pointerdown", (event) => {
 			if (event.target === backdrop) setBadgeModalOpen(false);
@@ -2390,61 +2480,74 @@ function apply(ctx) {
 		return backdrop;
 	}
 
-	/** 按当前条目快照重建弹窗内容：三组（运行中 / 需要交互 / 已完成），
-	 *  每条一行——状态色点 + 标题 + 工作区，点击即跳转并关闭弹窗。 */
+	/** 按当前条目快照就地更新弹窗内容：三组（运行中 / 需要交互 / 已完成），
+	 *  每条一行——状态色点 + 标题 + 工作区，点击即跳转并关闭弹窗。
+	 *
+	 *  增量复用（东家 2026-10-14 缺陷三「鼠标停在列表上一直闪」）：弹窗打开期间
+	 *  render() 随 1 秒运行卡时钟与推送逐轮执行，若每轮 replaceChildren 整表重建，
+	 *  指针下的 .dap-modal-item 被反复销毁重建——CSS :hover 与行尾箭头的 0.12s
+	 *  过渡被反复打断重启，视觉上即持续闪烁（同 5509 行附近卡片区既有教训）。
+	 *  故条目按 entry.id 复用节点、只改文案与顺序：路径上无 DOM 移动即无 hover 丢失。 */
 	function renderBadgeModal() {
-		if (badgeModalBody === null) return;
-		const groups = [
-			["running", "运行中", badgeEntries.running],
-			["interaction", "需要交互", badgeEntries.interaction],
-			["completed", "已完成", badgeEntries.completed],
-		];
-		const nodes = [];
-		for (const [tone, label, entries] of groups) {
-			const group = makeEl("div", "dap-modal-group");
-			group.dataset.tone = tone;
-			const head = makeEl("div", "dap-modal-group-head");
-			const headTitle = makeEl("span", "dap-modal-group-title");
-			headTitle.textContent = label;
-			const headCount = makeEl("span", "dap-modal-group-count");
-			headCount.textContent = String(entries.length);
-			headCount.toggleAttribute("data-zero", entries.length === 0);
-			head.append(headTitle, headCount);
-			group.append(head);
-			if (entries.length === 0) {
-				const empty = makeEl("div", "dap-modal-empty");
-				empty.textContent = "暂无";
-				group.append(empty);
-			} else {
-				for (const entry of entries) {
-					const item = document.createElement("button");
-					item.type = "button";
-					item.className = "dap-modal-item";
-					item.dataset.tone = tone;
-					item.append(makeEl("span", "dap-modal-dot"));
-					const text = makeEl("span", "dap-modal-item-text");
-					const name = makeEl("span", "dap-modal-item-title");
-					name.textContent = entry.title ?? String(entry.id);
-					text.append(name);
-					if (entry.workspaceTitle) {
-						const ws = makeEl("span", "dap-modal-item-ws");
-						ws.textContent = entry.workspaceTitle;
-						text.append(ws);
-					}
-					// 行尾跳转提示（悬停/聚焦显现）；纯装饰，语义已由条目按钮的可访问名承载。
-					const go = makeEl("span", "dap-modal-item-go");
-					go.append(createGoIcon());
-					item.append(text, go);
-					item.addEventListener("click", () => {
-						setBadgeModalOpen(false);
-						openSessionFromBadge(entry.id);
-					});
-					group.append(item);
-				}
+		const groups = badgeModalGroups;
+		if (groups === null) return;
+		// 组序直接取 BADGE_MODAL_GROUPS 单点口径：段头文案、骨架与渲染同源，
+		// 增删分组只需改常量一处（避免骨骼与渲染各写一份三元组而漂移）。
+		for (const [tone] of BADGE_MODAL_GROUPS) {
+			const entries = badgeEntries[tone] ?? [];
+			const rec = groups.get(tone);
+			if (rec === undefined) continue;
+			// 先比再写：textContent 赋值会换掉文本节点，即使内容相同也触发一次排版；
+			// 计数与状态未变时这一轮就应当是纯粹的「无写入」（R-02-003/AC-01）。
+			const countText = String(entries.length);
+			if (rec.count.textContent !== countText) {
+				rec.count.textContent = countText;
 			}
-			nodes.push(group);
+			rec.count.toggleAttribute("data-zero", entries.length === 0);
+			rec.empty.hidden = entries.length > 0;
+			rec.items.hidden = entries.length === 0;
+			// 先回收本轮不再出现的条目节点（会话落定/归档后不再属于该组），再按序就位。
+			// 顺序不可颠倒：残留节点若还占着位置，下面的 ref 比对会误判成「顺序变了」，
+			// 把悬停中的行也移除再插回，白丢一次 :hover。
+			const live = new Set(entries.map((entry) => String(entry.id)));
+			for (const [key, item] of rec.byId) {
+				if (live.has(key)) {
+					continue;
+				}
+				item.el.remove();
+				rec.byId.delete(key);
+			}
+			entries.forEach((entry, index) => {
+				const key = String(entry.id);
+				let item = rec.byId.get(key);
+				if (item === undefined) {
+					item = makeBadgeModalItem(tone);
+					rec.byId.set(key, item);
+					// 点击回调只绑一次，按 key 取当前快照里的会话 id：条目文案随后
+					// 变化时无需重绑，跳转目标永远是这一轮的最新 id。
+					item.el.addEventListener("click", () => {
+						setBadgeModalOpen(false);
+						openSessionFromBadge(key);
+					});
+				}
+				// 与 ws 同样先比再写：无条件赋值也会换掉文本节点，白触发一次排版。
+				const titleText = entry.title ?? key;
+				if (item.title.textContent !== titleText) {
+					item.title.textContent = titleText;
+				}
+				const wsText = entry.workspaceTitle ?? "";
+				if (item.ws.textContent !== wsText) {
+					item.ws.textContent = wsText;
+				}
+				item.ws.hidden = wsText === "";
+				// 只有顺序真正变化时才移动 DOM（与卡片区同一条纪律）：ref 与自身相等
+				// 即位置未变，此时不碰 DOM——悬停中的条目不会被移除再插回。
+				const ref = rec.items.children[index] ?? null;
+				if (ref !== item.el) {
+					rec.items.insertBefore(item.el, ref);
+				}
+			});
 		}
-		badgeModalBody.replaceChildren(...nodes);
 	}
 
 	/** 开合弹窗：打开时按快照渲染内容并把焦点送进对话框，关闭时归还焦点。 */
@@ -6718,7 +6821,7 @@ function apply(ctx) {
 		setBadgeModalOpen(false);
 		badgeModalEl?.remove();
 		badgeModalEl = null;
-		badgeModalBody = null;
+		badgeModalGroups = null;
 		badgeModalReturnFocus = null;
 		completeAcksById.clear();
 		busyById.clear();

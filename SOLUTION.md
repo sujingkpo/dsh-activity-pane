@@ -443,10 +443,12 @@ flowchart LR
 - 职责:
   - 入口行角标：在宿主左栏面板行列表的 `sidebar.panellist` 槽位注册「活动会话」入口行，行内 glyph 呈现三状态角标（运行中/需要交互/已完成），计数为 0 的点置灰不隐藏（实现 R-01-026）
   - 分组明细弹窗：接管入口行的点击以打开自建弹窗，按三类列出计数与条目，条目激活跳转会话；Escape 关闭并把焦点归还入口行（实现 R-01-026）
+  - 弹窗明细的稳定刷新：三组骨架（段头、计数、空态、条目容器）在弹窗首次打开时一次建成并常驻，条目节点按 `entry.id` 复用、只改文案与顺序——顺序未变时不触碰 DOM，指针下条目的 `:hover` 与行尾过渡不因逐轮刷新被重建成新节点而中断；这与卡片区「只有顺序/归属真正变化时才移动 DOM」是同一条纪律，刷新语义（计数、分组、空态与条目集合）不变（R-02-003/AC-01、R-01-026/AC-02）
 - 关键内部结构:
   - 数据通路与窗格渲染画面解耦：计数与明细由 `deriveActiveModel` 的同一轮派生结果驱动，快照刷新、订阅与动画收口不读写窗格 DOM、也不依赖窗格脉冲面；窗格不可得时角标与弹窗照常更新（R-01-026/AC-03、AC-04）。
   - 口径单点：三类条目与计数由 `src/core.mjs#classifyActiveEntries(entries)` 一次归类给出（运行中 = kind `running`；需要交互 = kind `awaiting` 且 `waitClass` `blocked`；已完成 = kind `awaiting` 且 `waitClass` `done`；计数即各组长度，`statusBadges(entries)` 复用同一归类），渲染层不自算同口径副本，角标计数与弹窗明细必然同源。
   - 快照与订阅：模块级 `badgeCounts`/`badgeEntries` 经 `subscribeBadgeCounts`/`notifyBadgeCounts` 暴露给 glyph 组件（React `useSyncExternalStore`）；计数相对上一帧增加即播一次强调动画，「需要交互」升级为 alert 变体；动画属性由定时器收口，渲染期不重复续挂。
+  - 「需要交互」持续强调：`需要交互` 计数大于 0 期间，glyph 常挂 `data-badge-awaiting`，由 CSS 走无界金色呼吸 + 外扩环（`dap-badge-await-pulse`、复用 `dap-badge-halo` 关键帧），计数归零即摘、动画随之停止；该属性按计数声明式给出，随宿主重渲染与 React 重挂自动跟随，不依赖命令式挂摘。一次性「新增」强调（`data-badge-hit`/`data-badge-alert`）选择器更具体，播放期间自动接管常闪，其收口定时器摘属性后自然落回，两侧无需互斥逻辑；`prefers-reduced-motion` 下仅关动效、保留金色状态色（R-01-026/AC-08）。
   - 刷新去重：角标另起 `lastBadgeSig` 签名（计数三元组 + 明细条目 id 集合），与窗格渲染签名互不干扰——窗格关闭期间窗格签名不推进，共用会让角标停在旧计数。
   - 弹窗键盘语义：`keydown` 捕获监听随开合成对挂摘，Escape 关闭、Tab 焦点陷阱，关闭时把焦点归还激活入口行的元素（R-01-026/AC-07）。
   - 入口行点击接管：glyph 经 `closest("button")` 在宿主 PanelRow 行按钮上绑原生 click，`preventDefault` + `stopPropagation` 压掉宿主 `selectPanel(id)`，改为打开弹窗；不在 `document` 上拦点击（R-01-026/AC-02）。
