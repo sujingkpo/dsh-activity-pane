@@ -42,7 +42,8 @@ export default async function badgeSurfaces({ browser, page, url, assert }) {
 	const initial = await until("角标入口行就位", () => badgeLabel(page));
 
 	// ---- AC-01：三状态角标结构、无障碍名称与悬停提示 ----
-	assert.match(initial, /^运行中 \d+，需要交互 \d+，已完成 \d+$/, `角标无障碍名称给出三状态计数（实测 ${initial}）`);
+	// 未读完成提醒存在时（R-01-026/AC-10）无障碍名称在后追加「（n 个未读）」，为 0 时不追加。
+	assert.match(initial, /^运行中 \d+，需要交互 \d+，已完成 \d+(（\d+ 个未读）)?$/, `角标无障碍名称给出三状态计数（实测 ${initial}）`);
 	const a11y = await page.evaluate(() => {
 		const glyph = document.querySelector(".dap-badge-glyph");
 		return {

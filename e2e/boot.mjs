@@ -19,7 +19,16 @@ import { startMockLlm } from "./mock-llm.mjs";
 
 const execFileAsync = promisify(execFile);
 const repoRoot = process.env.E2E_REPO_ROOT ?? join(dirname(fileURLToPath(import.meta.url)), "..");
-const DSH_LAUNCHER = { bin: "C:\\Program Files\\DSH Desktop\\DSH Desktop.exe", prefix: ["--expose-internals", "C:\\Program Files\\DSH Desktop\\resources\\app\\lib\\desktop-cli.js"] };
+// 启动器路径可经环境变量覆盖（E2E_DSH_BIN / E2E_DSH_CLI）：桌面端安装位置随发行渠道
+// 变化（DSH Desktop / DSH NEXT / 自定义目录），默认值保持 CI 与干净机器的既有路径，
+// 本地换渠道时不必改代码。
+const DSH_LAUNCHER = {
+	bin: process.env.E2E_DSH_BIN ?? "C:\\Program Files\\DSH Desktop\\DSH Desktop.exe",
+	prefix: [
+		"--expose-internals",
+		process.env.E2E_DSH_CLI ?? "C:\\Program Files\\DSH Desktop\\resources\\app\\lib\\desktop-cli.js",
+	],
+};
 const withLauncher = (args) => [...DSH_LAUNCHER.prefix, ...args];
 const launcherEnv = (env) => ({ ...env, ELECTRON_RUN_AS_NODE: "1" });
 

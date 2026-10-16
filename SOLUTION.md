@@ -328,7 +328,7 @@ flowchart LR
 | R-01-022 | 窗格渲染器 | 标题行左侧仓库入口 | src/client.mjs |
 | R-01-023 | 活动状态模型 | 在跑后台任务的活性派生、完成/错误提醒抑制与徽标计数、任务子卡层级与两行呈现、任务子卡档位门控 | src/core.mjs、src/client.mjs |
 | R-01-025 | 窗格渲染器 | 档位资源纪律：紧凑档主会话日志窗口/深翻/目录读取门控、切档再水合与隐藏行跳写、任务子卡不构建与时长时钟门控 | src/core.mjs、src/client.mjs |
-| R-01-026 | 宿主侧栏角标 | 入口行三状态角标、分组明细弹窗与不依赖窗格挂载的数据通路 | src/core.mjs、src/client.mjs |
+| R-01-026 | 宿主侧栏角标 | 入口行三状态角标、分组明细弹窗、不依赖窗格挂载的数据通路、完成提醒已读/未读标识与已完成的批量动作 | src/core.mjs、src/client.mjs |
 
 ## 产品契约
 
@@ -444,11 +444,18 @@ flowchart LR
 - 职责:
   - 入口行角标：在宿主左栏面板行列表的 `sidebar.panellist` 槽位注册「活动会话」入口行，行内 glyph 呈现三状态角标（运行中/需要交互/已完成），计数为 0 的点置灰不隐藏（实现 R-01-026）
   - 分组明细弹窗：接管入口行的点击以打开自建弹窗，按三类列出计数与条目，条目激活跳转会话；Escape 关闭并把焦点归还入口行（实现 R-01-026）
+  - 完成提醒的已读/未读标识：窗格「已完成」分区卡片与弹窗「已完成」组条目按同一已读游标呈现两种状态；角标按未读数给出提示与无障碍读数（实现 R-01-026/AC-09～AC-12）
+  - 已完成的批量动作：两处段头各提供「全部已读」与「全部移入历史」入口，前者只推进本地已读游标，后者复用卡片「移入历史」的同一枚完成确认写回（实现 R-01-026/AC-13、AC-14）
   - 弹窗明细的稳定刷新：三组骨架（段头、计数、空态、条目容器）在弹窗首次打开时一次建成并常驻，条目节点按 `entry.id` 复用、只改文案与顺序——顺序未变时不触碰 DOM，指针下条目的 `:hover` 与行尾过渡不因逐轮刷新被重建成新节点而中断；这与卡片区「只有顺序/归属真正变化时才移动 DOM」是同一条纪律，刷新语义（计数、分组、空态与条目集合）不变（R-02-003/AC-01、R-01-026/AC-02）
 - 关键内部结构:
   - 数据通路与窗格渲染画面解耦：计数与明细由 `deriveActiveModel` 的同一轮派生结果驱动，快照刷新、订阅与动画收口不读写窗格 DOM、也不依赖窗格脉冲面；窗格不可得时角标与弹窗照常更新（R-01-026/AC-03、AC-04）。
-  - 口径单点：三类条目与计数由 `src/core.mjs#classifyActiveEntries(entries)` 一次归类给出（运行中 = kind `running`；需要交互 = kind `awaiting` 且 `waitClass` `blocked`；已完成 = kind `awaiting` 且 `waitClass` `done`；计数即各组长度，`statusBadges(entries)` 复用同一归类），渲染层不自算同口径副本，角标计数与弹窗明细必然同源。
+  - 口径单点：三类条目与计数由 `src/core.mjs#classifyActiveEntries(entries, doneReadById)` 一次归类给出（运行中 = kind `running`；需要交互 = kind `awaiting` 且 `waitClass` `blocked`；已完成 = kind `awaiting` 且 `waitClass` `done`；计数即各组长度，`statusBadges(entries)` 复用同一归类），渲染层不自算同口径副本，角标计数与弹窗明细必然同源。
+  - 已读/未读判定单点：传入已读游标（sessionId → 已读时的 `lastTurnEnd`）时，归类函数对完成提醒条目就地写入 `unread = doneEntryUnread(entry, readAt)`（`stateAt > readAt` 即未读，进入时刻不可得时保守判为未读）；窗格「已完成」分区、弹窗条目与角标未读读数消费同一字段，不再各持一份判定（R-01-026/AC-09～AC-12）。
+  - 已读写入的单一入口：`markDoneRead(sessionId)` 把游标推进到条目当前 `stateAt` 并持久化到 localStorage（键 `dsh-activity-pane:done-read`）；窗格卡片激活与弹窗条目激活都经它写入——两条路径是同一次「我看过了」。该游标独立于宿主完成确认账本，写已读不解除完成提醒（R-01-002/AC-05 不变）。
+  - 未读角标提示：`badgeCounts.completedUnread` 为未读完成提醒数，大于 0 时 glyph 挂 `data-badge-unread` 并显示静态外圈提示环（`::before`，完成提醒同源绿色 `#3fbf7f`），无障碍名称追加「（n 个未读）」；提示环不闪——闪动通道留给要求立即行动的「需要交互」（R-01-026/AC-10）。
+  - 一键已读：`markAllDoneRead()` 遍历 `doneEntriesById` 把未读条目的游标逐个推到各自 `stateAt`，写盘一次并触发一轮渲染；窗格「已完成」分区段头（`.dap-done-head .dap-read-all`）与角标弹窗「已完成」组段头各一枚同名入口，两处都只在未读数大于 0 时呈现，可访问名称给出待标记条数；点击 `preventDefault` + `stopPropagation`，不触发卡片激活与会话跳转，也不写宿主完成确认账本（R-01-026/AC-13）。
   - 快照与订阅：模块级 `badgeCounts`/`badgeEntries` 经 `subscribeBadgeCounts`/`notifyBadgeCounts` 暴露给 glyph 组件（React `useSyncExternalStore`）；计数相对上一帧增加即播一次强调动画，「需要交互」升级为 alert 变体；动画属性由定时器收口，渲染期不重复续挂。
+  - 一键移入历史：`ackAllDone()` 先 `markAllDoneRead()`（一次处理掉整批，没有理由把它们留在未读态）、再对 `doneEntriesById` 里的每个会话逐个调 `ackCompletion(id)`——与卡片「移入历史」是同一枚写回，乐观更新与失败回滚逐条独立，不新增解除路径、不自建网络通道；窗格「已完成」分区段头（`.dap-done-head .dap-done-all`）与弹窗「已完成」组段头各一枚入口，两处按分区条数显隐（与未读无关），点击 `preventDefault` + `stopPropagation`，不触发会话跳转（R-01-026/AC-14）。
   - 「需要交互」持续强调：`需要交互` 计数大于 0 期间，glyph 常挂 `data-badge-awaiting`，由 CSS 走无界金色呼吸 + 外扩环（`dap-badge-await-pulse`、复用 `dap-badge-halo` 关键帧），计数归零即摘、动画随之停止；该属性按计数声明式给出，随宿主重渲染与 React 重挂自动跟随，不依赖命令式挂摘。一次性「新增」强调（`data-badge-hit`/`data-badge-alert`）选择器更具体，播放期间自动接管常闪，其收口定时器摘属性后自然落回，两侧无需互斥逻辑；`prefers-reduced-motion` 下仅关动效、保留金色状态色（R-01-026/AC-08）。
   - 刷新去重：角标另起 `lastBadgeSig` 签名（计数三元组 + 明细条目 id 集合），与窗格渲染签名互不干扰——窗格关闭期间窗格签名不推进，共用会让角标停在旧计数。
   - 弹窗键盘语义：`keydown` 捕获监听随开合成对挂摘，Escape 关闭、Tab 焦点陷阱，关闭时把焦点归还激活入口行的元素（R-01-026/AC-07）。
@@ -469,6 +476,7 @@ flowchart LR
   - 后台任务子卡两行结构与底色区分（R-01-023/AC-05～AC-07）：行 1 为标题行（`.dap-job-dot` 状态点 + `.dap-job-kind` 工具名称 + `.dap-job-elapsed` 随时钟时长右缘对齐），状态点活性呈现按状态门控：仅 running/stopping 以 `dap-pulse 1.2s` 固定节奏闪烁并带同色相光晕——运行中任务蓝 `#65a0ff`、停止中琥珀 `#f5a524`，节奏与运行中主会话卡标题状态点同源（R-01-023/AC-09），行 2 为内容行（`.dap-job-content` 内 `.dap-job-label` mono 单行省略、原生 tooltip 承载完整原文，内容为空整行 `hidden`）；任务子卡仅在完整呈现档构建与呈现，中间/紧凑档不呈现子卡（R-01-023/AC-10、R-01-025/AC-08），切回完整档随档位重渲染恢复；卡面底色在子代理卡底色上经 `color-mix` 轻染任务状态点同族的 `#65a0ff` 蓝（明暗两主题同法），与子代理卡相互可辨且不改变子卡呈现；job 子卡为纯展示——不绑激活监听、不设 `role="button"`/`tabIndex`、默认光标且无悬停/聚焦反馈（R-01-023/AC-08）。
   - 卡片按 id 复用，流程节点按稳定 id 复用 DOM；配合签名去重避免无谓 DOM 写入，并保持运行节点脉冲动画连续。
   - 当前会话同步：`cardSignature` 中的 `isCurrent` 驱动原生侧栏切换后的单帧更新；渲染完成后只对已呈现且未完整可见的当前卡片调用 `.dap-scroll.scrollTo({ top, behavior: "smooth" })`，以最小必要距离快速平滑上下滚动；调用失败时直接落位，不调用外层页面滚动。
+  - 完成提醒的已读/未读呈现（R-01-026/AC-09～AC-12）：`已完成` 分区卡片按条目 `unread`（判定见"宿主侧栏角标"的判定单点）经 `data-unread` 属性分支——未读为实心状态色点 + 光晕 + 左缘绿色色条（`::before` 绘制，不用 `border-left`：等待卡面与当前会话卡的整边 `border-color` 会顶掉边框着色）+ 标题加粗 + 末行脉冲；已读为空心状态点（`:not([data-unread])` 规则，选择器带属性以压过等待卡的实心状态点规则）+ 无左缘色条 + 常规字重 + 整卡 0.72 不透明度弱化（悬停回到 0.88，与最近卡的弱化同一手法）。文字通道由 `core#doneWaitLabel(unread)` 单点派生：未读胶囊文案「已完成（未读）」、已读回落「已完成」；无障碍名称在未读时追加「未读」。已读后末行停止脉冲的门控写在末行脉冲规则本身——阻塞/错误提醒（无已读语义）与未读完成提醒走同一 `dap-pulse 1.2s`，已读完成提醒不落在任何脉冲规则内；`dap-done` 分区内的状态点与左缘条规则同时作用于弹窗条目（同一视觉语言）。
   - 完成确认通道与迁移检测：完成提醒成立由核心 `completionReminder` 从 SSE ack 状态派生（`lastTurnEnd > ackedAt`，且未被 running/阻塞等待/委托周期抑制）；错误提醒成立由核心 `errorReminder` 从同一通道派生（`lastTurnEndKind === 'error'`，不消费 ack 游标）；完成提醒卡末行正文行之后渲染「移入历史」按钮，激活时除 ack 写回（`POST /dsh-activity-pane/api/ack`）与本地即时更新外不触发卡片跳转；确认后同一帧派生解除，卡片经既有 FLIP 动画迁入历史区。跨区迁移（活动区↔历史区，双向）以旧卡克隆 ghost FLIP 平移淡降 + 真卡淡入呈现，迁移检测收敛到 `movedToRecentIds`/`movedToActiveIds` 纯函数；位置受影响的其它卡片与历史区段头经 FLIP 反向位移平滑过渡，`transitionend` 收口，`prefers-reduced-motion` 降级为直接落位（R-01-002/AC-05、AC-10、AC-13、R-01-010/AC-06、AC-07、AC-10）。
   - 工作区徽标为「文件夹图标 + 名称文本」双段结构：胶囊内常驻与左边栏工作区条目同源的 canonical 文件夹图标（dsh-client-ui-primitives IconFolderClose16 同款 path，经 `createInlineIcon` 工厂复刻），置于名称文字之前使归属一眼可辨；名称字号 10.5px（AC-07 下限）、行高 14px 不变以维持胶囊与卡片高度；无归属时整枚隐藏；文本写入独立文本段，省略号截断不波及图标（R-01-003/AC-03、AC-06、AC-07）。徽标按条目 `workspaceKey` 经核心 `resolveWorkspaceColors` 派生前景槽位与背景变体，写入 hue、前景主题 L/C、背景主题 L/C 与混合强度自定义属性，图标、文字、底色与描边同色相族着色，槽位变化并入既有 workspaceKey 签名驱动重绘（R-01-003/AC-08、AC-09、AC-10、AC-12）。
   - 最近卡两条消息预览行为「角色图标 + 角色标签 + 圆点分隔符 + 文本」结构：用户消息行人物图标 +「用户」、agent 回复行机器人图标 +「助手」，图标常驻且字形 12px 与时间线图标字形一致；文本与加载 spinner 只写入文本段，不覆盖图标与标签（R-01-013/AC-07、AC-08）。最近卡在该两行之后复用 `.dap-token-stats` 显示最近回合统计，再以 `activityAt` 时间行收尾（R-01-013/AC-12）。

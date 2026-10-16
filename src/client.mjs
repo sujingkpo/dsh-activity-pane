@@ -180,6 +180,18 @@ const CSS = `
   border: 2px solid currentColor;
   animation: dap-badge-halo 1.6s ease-out infinite;
 }
+/* 完成提醒未读提示（R-01-026/AC-10、AC-12）：还有未读完成项时，整个 glyph 外圈套一层
+   绿色提示环——与窗格「已完成」分区的未读标识同色同源（#3fbf7f）。静态不闪：未读是
+   「有东西等你看」的持续状态，闪动通道留给要求立即行动的「需要交互」，两者不叠成噪声。
+   环用 ::before（::after 已被常闪与一次性强调占用）；全部已读即摘属性，环随之消失。 */
+.dap-badge-glyph[data-badge-unread]::before {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border-radius: 999px;
+  pointer-events: none;
+  border: 1.5px solid #3fbf7f;
+}
 @media (prefers-reduced-motion: reduce) {
   /* 「需要交互」常闪只关动效、保留金色状态色：状态反馈不能随动效一起消失
      （与等待胶囊 dap-await-pulse 同一条口径）。 */
@@ -347,6 +359,27 @@ const CSS = `
 .dap-modal-item-text { display: flex; align-items: baseline; gap: 8px; min-width: 0; flex: 1; }
 .dap-modal-item-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dap-modal-item-ws { flex: none; font-size: 11px; color: var(--dsw-alias-label-tertiary, color-mix(in srgb, currentColor 48%, transparent)); }
+/* 条目已读/未读状态文本（R-01-026/AC-09～AC-12）：仅「已完成」组携带。未读为绿底绿字，
+   已读为灰字；与状态点形状（实心/空心）和标题字重一起构成三条通道，不只靠颜色。 */
+.dap-modal-item-state {
+  flex: none; font-size: 10px; line-height: 14px; font-weight: 700;
+  border-radius: 999px; padding: 0 6px;
+  color: color-mix(in srgb, currentColor 46%, transparent);
+}
+.dap-modal-item[data-unread] .dap-modal-item-state {
+  color: #3fbf7f;
+  background: color-mix(in srgb, #3fbf7f 16%, transparent);
+}
+/* 未读条目：状态点实心并带光晕、标题加粗；已读条目：状态点改空心（用 inset 阴影保持
+   7px 占位不变，避免行内元素尺寸跳动）、标题常规字重、整体弱化。 */
+.dap-modal-item[data-unread] .dap-modal-dot { box-shadow: 0 0 6px color-mix(in srgb, #3fbf7f 80%, transparent); }
+.dap-modal-item[data-unread] .dap-modal-item-title { font-weight: 600; }
+/* 已读条目（属性不存在）：标题色调回落、状态点改空心（inset 阴影保持 7px 占位不变）。 */
+.dap-modal-item[data-tone="completed"]:not([data-unread]) .dap-modal-item-title { color: color-mix(in srgb, currentColor 62%, transparent); }
+.dap-modal-item[data-tone="completed"]:not([data-unread]) .dap-modal-dot {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px color-mix(in srgb, #3fbf7f 50%, transparent);
+}
 /* 条目行尾的跳转提示：悬停/聚焦才显现，静止时保持列表干净。 */
 .dap-modal-item-go {
   flex: none; width: 14px; height: 14px;
@@ -375,20 +408,50 @@ const CSS = `
   color: color-mix(in srgb, currentColor 52%, transparent);
   text-transform: uppercase;
 }
-/* 未读/已读标识：未读为实心圆点（随状态色），已读为空心圆点。两者都常显，
-   形状差异 + aria-label 承载语义（不只靠颜色）。 */
-[data-dsh-activity-pane] .dap-done .dap-card .dap-dot {
+/* 未读/已读标识（R-01-026/AC-09～AC-12）：未读为实心状态色圆点 + 左缘色条 + 加粗标题 +
+   末行脉冲；已读为空心圆点 + 无左缘色条 + 常规字重 + 整卡弱化。形状、色条、字重、动效
+   四条通道叠加，不只靠颜色区分（颜色对色觉障碍用户不可靠），aria-label 另载文字语义。 */
+/* 已读（属性不存在）：空心环。选择器必须带 :not([data-unread]) ——等待卡的状态点规则
+   （.dap-card[data-kind="awaiting"] .dap-dot，特异性同为 0-3-0 但定义在后）会把实心
+   完成色写回来；带一个属性选择器后特异性 0-4-0，稳定压过它。 */
+[data-dsh-activity-pane] .dap-done .dap-card:not([data-unread]) .dap-dot {
   width: 7px;
   height: 7px;
   background: transparent;
   border: 1.5px solid color-mix(in srgb, currentColor 45%, transparent);
+  box-shadow: none;
 }
 [data-dsh-activity-pane] .dap-done .dap-card[data-unread] .dap-dot {
   background: #3fbf7f;
   border-color: #3fbf7f;
+  box-shadow: 0 0 7px rgba(88, 201, 143, 0.8);
 }
-/* 未读条目标题加粗一档：形状 + 字重双通道，不只靠颜色区分未读/已读。 */
+/* 未读条目的左缘色条：贴卡片左缘的 3px 竖条，扫一眼列表即可看出还有哪些没读。
+   用 ::before 绘制而非 border-left——等待卡面与当前会话卡的 border-color 是整边简写，
+   定义在本规则之后、特异性也更高，边框着色会被它们顶掉（实测当前会话的未读完成卡
+   左缘显蓝）；伪元素不受边框层影响，也不占布局（卡片已是 position: relative）。 */
+[data-dsh-activity-pane] .dap-done .dap-card[data-unread]::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  border-radius: 14px 0 0 14px;
+  background: #3fbf7f;
+  pointer-events: none;
+}
+/* 未读条目标题加粗一档：形状 + 字重 + 色条 + 脉冲四通道，不只靠颜色区分未读/已读。 */
 [data-dsh-activity-pane] .dap-done .dap-card[data-unread] .dap-title { font-weight: 600; }
+/* 已读条目整体弱化（与最近历史卡同一弱化手法，见 .dap-card[data-kind="recent"]），
+   与未读条目拉开层级；已读后末行停止脉冲（门控见下方 data-unread 作用域规则），
+   完成提醒由「待你看一眼」转为静止的就绪呈现。悬停时回到可辨的不透明度。 */
+[data-dsh-activity-pane] .dap-done .dap-card:not([data-unread]) {
+  opacity: 0.72;
+}
+[data-dsh-activity-pane] .dap-done .dap-card:not([data-unread]):hover {
+  opacity: 0.88;
+}
 
 /* 新增功能一：停靠在宿主右侧栏 tab 正文内时，窗格不再是中列的 flex 子项，
    不再靠 --dap-width 撑开中列，也不再绘制左缘 1px 分隔线（右栏自身有边界）；
@@ -813,6 +876,69 @@ const CSS = `
 [data-dsh-activity-pane] .dap-recent-more:focus-visible { outline: 2px solid color-mix(in srgb, currentColor 45%, transparent); outline-offset: 1px; }
 [data-dsh-activity-pane] .dap-recent-more[disabled] { cursor: wait; opacity: 0.6; }
 [data-dsh-activity-pane] .dap-recent-more[hidden] { display: none; }
+/* 段头行尾的「全部已读」小按钮（R-01-026/AC-13）：窗格「已完成」分区段头与弹窗「已完成」
+   组段头共用同一套外观——段头右侧、胶囊形、字号与段头同量级；无未读条目时整枚隐藏
+   （没有可标记的对象时不占位、也不诱导点击）。按钮只清未读，不等价于「移入历史」。 */
+[data-dsh-activity-pane] .dap-read-all,
+.dap-read-all {
+  margin-left: auto;
+  flex: none;
+  padding: 1px 8px;
+  border: 1px solid color-mix(in srgb, #3fbf7f 42%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, #3fbf7f 12%, transparent);
+  color: #3fbf7f;
+  font: inherit;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 14px;
+  letter-spacing: 0;
+  text-transform: none;
+  cursor: pointer;
+}
+[data-dsh-activity-pane] .dap-read-all:hover,
+[data-dsh-activity-pane] .dap-read-all:focus-visible,
+.dap-read-all:hover,
+.dap-read-all:focus-visible {
+  background: color-mix(in srgb, #3fbf7f 26%, transparent);
+}
+[data-dsh-activity-pane] .dap-read-all:focus-visible,
+.dap-read-all:focus-visible { outline: 2px solid color-mix(in srgb, #3fbf7f 55%, transparent); outline-offset: 1px; }
+[data-dsh-activity-pane] .dap-read-all[hidden],
+.dap-read-all[hidden] { display: none; }
+/* 段头行尾的「全部移入历史」入口（R-01-026/AC-14）：与「全部已读」并排，语义更重
+   （写回宿主、卡片迁出分区），故用中性次要按钮外观而非绿色——绿色留给「已读」这一
+   无副作用的本地动作。它调用的是卡片上同一枚确认写回，不新增解除路径。
+   行尾对齐：已读入口在场时由它的 margin-left:auto 顶开，不在场时本按钮自己顶到行尾。 */
+[data-dsh-activity-pane] .dap-done-all,
+.dap-done-all {
+  flex: none;
+  padding: 1px 8px;
+  border: 1px solid color-mix(in srgb, currentColor 16%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, currentColor 9%, transparent);
+  color: color-mix(in srgb, currentColor 58%, transparent);
+  font: inherit;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 14px;
+  letter-spacing: 0;
+  text-transform: none;
+  cursor: pointer;
+}
+[data-dsh-activity-pane] .dap-done-all:hover,
+[data-dsh-activity-pane] .dap-done-all:focus-visible,
+.dap-done-all:hover,
+.dap-done-all:focus-visible {
+  background: color-mix(in srgb, currentColor 16%, transparent);
+  color: color-mix(in srgb, currentColor 82%, transparent);
+}
+[data-dsh-activity-pane] .dap-done-all:focus-visible,
+.dap-done-all:focus-visible { outline: 2px solid color-mix(in srgb, currentColor 45%, transparent); outline-offset: 1px; }
+[data-dsh-activity-pane] .dap-done-all[hidden],
+.dap-done-all[hidden] { display: none; }
+[data-dsh-activity-pane] .dap-read-all[hidden] ~ .dap-done-all,
+.dap-read-all[hidden] ~ .dap-done-all { margin-left: auto; }
 /* 折叠：仅桌面生效；窄条 + 竖排标题与计数（R-01-011/AC-04）。 */
 [data-dsh-activity-pane] .dap-rail {
   display: none;
@@ -1080,10 +1206,15 @@ const CSS = `
 }
 [data-dsh-activity-pane] .dap-capsule-icon:empty { display: none; }
 [data-dsh-activity-pane] .dap-capsule-icon svg { display: block; width: 12px; height: 12px; }
-/* 等待三类的末行脉冲（R-01-002/AC-07、AC-08，C-043、C-065）：闪烁载体为卡片末行——
-   类型胶囊与正文固定以 1.2s 同频同相闪烁；「移入历史」按钮不闪。等待队列变化时渲染层
-   将全部末行元素与三处数量胶囊统一重启对相；标题状态点三类均静止。 */
-[data-dsh-activity-pane] .dap-card[data-kind="awaiting"] .dap-foot :is(.dap-capsule, .dap-note) {
+/* 等待三类的末行脉冲（R-01-002/AC-07、AC-08，C-043、C-065；R-01-026/AC-11）：闪烁载体
+   为卡片末行——类型胶囊与正文固定以 1.2s 同频同相闪烁；「移入历史」按钮不闪。等待队列
+   变化时渲染层将全部末行元素与三处数量胶囊统一重启对相；标题状态点三类均静止。
+   已读的完成提醒停止脉冲（东家 2026-10-16 反馈）：已读是本轮明确的「我看到了」动作，
+   再闪等于把已处理的状态重新标成待办。故脉冲分两支——阻塞等待与错误提醒（没有已读
+   语义、data-unread 属性根本不存在）照旧脉冲；完成提醒只有未读（data-unread 存在，
+   与窗格 [data-unread] 同一 toggleAttribute 语义）才脉冲。 */
+[data-dsh-activity-pane] .dap-card[data-kind="awaiting"]:not([data-wait="done"]) .dap-foot :is(.dap-capsule, .dap-note),
+[data-dsh-activity-pane] .dap-card[data-kind="awaiting"][data-wait="done"][data-unread] .dap-foot :is(.dap-capsule, .dap-note) {
   animation: dap-pulse 1.2s ease-in-out infinite;
 }
 /* 复审修复（C-040、C-043）：状态点光晕三类同强度、仅换色相——阻塞金、完成绿与错误红光晕一致。 */
@@ -1966,19 +2097,58 @@ function apply(ctx) {
 	/** 待发起的右栏 tab 打开请求：只在停靠面切到 right 的那一刻置位，消费一次即清。
 	 *  这样「用户关掉 tab」不会被下一轮渲染重新打开。 */
 	let rightTabNeedsRequest = false;
+	/** 单条已读游标推进（R-01-026/AC-11）：进入时刻晚于当前游标才推进，并就地更新条目的
+	 *  unread 字段（弹窗与窗格两个面读同一字段，写盘后无须再等一轮派生即可呈现已读）。
+	 *  返回是否真的发生了变化——调用方据此决定写盘与触发渲染。进入时刻不可得
+	 *  （未登记 turn/end）时不动游标，与 core#doneEntryUnread 的保守判定同向。 */
+	function advanceDoneReadCursor(id, entry) {
+		const entered = Number(entry?.stateAt);
+		if (!Number.isFinite(entered)) return false;
+		const current = doneReadById.get(id);
+		if (Number.isFinite(current) && current >= entered) return false;
+		doneReadById.set(id, entered);
+		entry.unread = false;
+		return true;
+	}
+
 	/** 「已完成」条目点击即已读：把游标推进到该条目的进入时刻（stateAt）。
 	 *  条目已不在分区/进入时刻不可得时不动游标。写盘后驱动一轮渲染更新未读标记。 */
 	function markDoneRead(sessionId) {
 		const id = String(sessionId);
 		const entry = doneEntriesById.get(id);
 		if (entry === undefined) return;
-		const entered = Number(entry.stateAt);
-		if (!Number.isFinite(entered)) return;
-		const current = doneReadById.get(id);
-		if (Number.isFinite(current) && current >= entered) return;
-		doneReadById.set(id, entered);
+		if (!advanceDoneReadCursor(id, entry)) return;
 		writeDoneReadLedger(doneReadById);
 		queueSync();
+	}
+
+	/** 一键已读（R-01-026/AC-13）：把当前全部未读的完成提醒一次标记为已读——游标逐个
+	 *  推进到各自条目的进入时刻。只写本地已读游标，不触宿主完成确认账本（完成提醒本身
+	 *  与「移入历史」按钮不受影响）；无未读条目时是空操作，不写盘、不触发渲染。
+	 *  条目索引由窗格渲染与角标刷新两处共同维护，故窗格不可得（右栏 tab 关闭）时从
+	 *  弹窗或角标路径触发同样成立。 */
+	function markAllDoneRead() {
+		let changed = false;
+		for (const [id, entry] of doneEntriesById) {
+			if (advanceDoneReadCursor(id, entry)) changed = true;
+		}
+		if (!changed) return;
+		writeDoneReadLedger(doneReadById);
+		queueSync();
+	}
+
+	/** 全部移入历史（R-01-026/AC-14）：把当前「已完成」分区里的每个会话逐个提交完成
+	 *  确认——与卡片上的「移入历史」是同一枚写回（ackCompletion），不新增解除路径。
+	 *  确认前先把这些会话标记为已读：用户一次处理掉整批，没有理由把它们留在未读态。
+	 *  逐个串行提交，宿主侧按会话各自持久化与广播；单个失败由 ackCompletion 自行回滚
+	 *  该会话的乐观游标，不影响其余会话。无完成条目时是空操作。 */
+	function ackAllDone() {
+		const ids = [...doneEntriesById.keys()];
+		if (ids.length === 0) return;
+		markAllDoneRead();
+		for (const id of ids) {
+			void ackCompletion(id);
+		}
 	}
 
 	/** 宿主侧栏「运行中 / 需要交互 / 已完成」角标入口行：注册 disposer 与上一次已呈现的
@@ -2220,7 +2390,9 @@ function apply(ctx) {
 	// ---- 宿主侧栏三状态角标（新增功能）：glyph 组件读的模块级快照 ----
 	/** 三状态角标的最新计数（syncBadgeSurface 每轮刷新）；glyph 组件据此渲染，
 	 *  面板正文据此列出分组明细。初值全 0，对应「0 值仍常显并置灰」。 */
-	let badgeCounts = { running: 0, interaction: 0, completed: 0 };
+	/** 未读完成提醒数（R-01-026/AC-10、AC-12）：与 completed 同源，计数大于 0 时
+	 *  侧栏 glyph 的完成色点带未读提示环。glyph 与 aria 文案共用这一份读数。 */
+	let badgeCounts = { running: 0, interaction: 0, completed: 0, completedUnread: 0 };
 	/** 三状态角标明细：按状态分组的条目快照（面板正文列条目用）。 */
 	let badgeEntries = { running: [], interaction: [], completed: [] };
 	/** 强调动画的收口 timer（新增计数时播一次，到期摘属性）。 */
@@ -2256,9 +2428,18 @@ function apply(ctx) {
 		// 口径单点（src/core.mjs#classifyActiveEntries）：一次归类同时给出三组条目与计数，
 		// 弹窗明细与角标计数同源；active 已含完成提醒条目（partitionDoneEntries 只是呈现
 		// 分批、不改变 active 内容），故已完成组即 done 分区同集合，不会重复计数。
-		const groups = classifyActiveEntries(active);
-		const next = { running: groups.running.length, interaction: groups.interaction.length, completed: groups.completed.length };
+		// 已读游标一并传入（R-01-026/AC-09～AC-12）：完成提醒条目在此就地得到 unread
+		// 字段，弹窗明细、侧栏 glyph 的未读读数和窗格「已完成」分区因此共用同一判定。
+		const groups = classifyActiveEntries(active, doneReadById);
+		const completedUnread = groups.completed.filter((entry) => entry.unread === true).length;
+		const next = { running: groups.running.length, interaction: groups.interaction.length, completed: groups.completed.length, completedUnread };
 		badgeEntries = { running: groups.running, interaction: groups.interaction, completed: groups.completed };
+		// 完成提醒条目同时进 doneEntriesById（R-01-026/AC-12）：弹窗/角标点击也要能把
+		// 已读游标推进到条目进入时刻，而这条路径不经过窗格渲染循环——窗格被关闭、宿主
+		// 布局缺失时仍然成立。同一对象重复登记（窗格路径也写同一 map）是幂等的。
+		for (const entry of groups.completed) {
+			doneEntriesById.set(String(entry.id), entry);
+		}
 		const sig = JSON.stringify([next, groups.running.map((entry) => entry.id), groups.interaction.map((entry) => entry.id), groups.completed.map((entry) => entry.id)]);
 		if (sig === lastBadgeSig) return;
 		lastBadgeSig = sig;
@@ -2315,7 +2496,10 @@ function apply(ctx) {
 			// useSyncExternalStore：宿主重渲染与计数变化都能拿到最新快照。
 			react.useSyncExternalStore(subscribeBadgeCounts, () => badgeCounts);
 			const counts = badgeCounts;
-			const label = "运行中 " + counts.running + "，需要交互 " + counts.interaction + "，已完成 " + counts.completed;
+			// 无障碍名称把未读数一并说清（R-01-026/AC-10）：完成色点的未读提示是纯视觉通道，
+			// 读屏用户只能从这里取得「还有几条完成提醒没看」。为 0 时不追加，避免噪声。
+			const label = "运行中 " + counts.running + "，需要交互 " + counts.interaction + "，已完成 " + counts.completed
+				+ (counts.completedUnread > 0 ? "（" + counts.completedUnread + " 个未读）" : "");
 			const dots = [["running", counts.running], ["interaction", counts.interaction], ["completed", counts.completed]];
 			// 鼠标与键盘路径统一由「宿主行按钮上的原生 click 监听」承载（见组件内的
 			// useEffect）：宿主把整行绑成了 selectPanel(id)，React 18 的合成事件委托在
@@ -2349,6 +2533,10 @@ function apply(ctx) {
 					// 「需要交互」常闪开关：声明式给出，随宿主重渲染与 React 重挂都自动跟随，
 					// 不靠命令式挂属性（重挂会连同属性一起丢）。计数归零即摘，动画随之停止。
 					"data-badge-awaiting": counts.interaction > 0 ? "true" : undefined,
+					// 完成未读提示（R-01-026/AC-10、AC-12）：有未读完成提醒时完成色点带提示环，
+					// 与窗格「已完成」分区的未读标识同一判定、同一视觉语言（实心 + 色条同源绿色）；
+					// 全部已读即摘除，回到普通置灰/点亮的静态色点。
+					"data-badge-unread": counts.completedUnread > 0 ? "true" : undefined,
 				},
 				dots.map(([tone, value]) => react.createElement("i", { key: tone, "data-tone": tone, "data-on": value > 0 ? "true" : "false" })),
 			);
@@ -2385,8 +2573,13 @@ function apply(ctx) {
 		};
 	}
 
-	/** 角标面板内的条目跳转：复用窗格的会话导航（uiWorkspace.openSession）。 */
+	/** 角标面板内的条目跳转：复用窗格的会话导航（uiWorkspace.openSession）。
+	 *  顺带把「已完成」条目标记为已读（R-01-026/AC-11、AC-12）：从侧栏弹窗点进会话与
+	 *  窗格点卡是同一次「我看过了」的动作，两条路径必须写入同一份已读游标，否则同一
+	 *  条目在弹窗里读过了、在窗格里还挂着未读。非完成提醒条目在该 map 中不存在，
+	 *  markDoneRead 自行短路。 */
 	function openSessionFromBadge(sessionId) {
+		markDoneRead(sessionId);
 		if (typeof ctx.get("uiWorkspace")?.openSession !== "function") return;
 		lastActivatedId = sessionId;
 		cancelStaleOpenRetries({ activatedId: sessionId });
@@ -2404,10 +2597,11 @@ function apply(ctx) {
 	 *  此后每轮渲染只改文案与顺序（见 renderBadgeModal）。 */
 	let badgeModalGroups = null;
 
-	/** 弹窗条目行（复用单元）：状态色点 + 标题 + 工作区后缀 + 行尾跳转提示。
-	 *  子节点一次建成后常驻——工作区后缀用文本 + hidden 表达有无，避免增删节点。
+	/** 弹窗条目行（复用单元）：状态色点 + 标题 + 工作区后缀 + 已读/未读状态文本 +
+	 *  行尾跳转提示。子节点一次建成后常驻——工作区后缀用文本 + hidden 表达有无，
+	 *  状态文本按条目是否有已读语义整段隐藏，避免增删节点。
 	 *  @param {string} tone 条目所属分组（running / interaction / completed）。
-	 *  @returns {{ el: HTMLButtonElement, title: HTMLElement, ws: HTMLElement }} */
+	 *  @returns {{ el: HTMLButtonElement, title: HTMLElement, ws: HTMLElement, state: HTMLElement }} */
 	function makeBadgeModalItem(tone) {
 		const item = document.createElement("button");
 		item.type = "button";
@@ -2418,12 +2612,16 @@ function apply(ctx) {
 		const name = makeEl("span", "dap-modal-item-title");
 		const ws = makeEl("span", "dap-modal-item-ws");
 		ws.hidden = true;
-		text.append(name, ws);
+		// 已读/未读状态文本（R-01-026/AC-09～AC-12）：只有「已完成」组的条目会写入，
+		// 其余组（与未读语义无关）整段隐藏——节点常驻、不参与增删。
+		const state = makeEl("span", "dap-modal-item-state");
+		state.hidden = true;
+		text.append(name, ws, state);
 		// 行尾跳转提示（悬停/聚焦显现）；纯装饰，语义已由条目按钮的可访问名承载。
 		const go = makeEl("span", "dap-modal-item-go");
 		go.append(createGoIcon());
 		item.append(text, go);
-		return { el: item, title: name, ws };
+		return { el: item, title: name, ws, state };
 	}
 
 	/** 惰性创建弹窗骨架：遮罩 + 居中对话框（标题行带关闭按钮）。 */
@@ -2457,15 +2655,43 @@ function apply(ctx) {
 			const groupTitle = makeEl("span", "dap-modal-group-title");
 			groupTitle.textContent = label;
 			const count = makeEl("span", "dap-modal-group-count");
+			// 「已完成」组段头行尾的「全部已读」按钮（R-01-026/AC-13）：与窗格「已完成」
+			// 分区段头同一外观与语义，其它两组不创建该节点。
+			const readAll = tone === "completed" ? makeEl("button", "dap-read-all") : null;
+			if (readAll !== null) {
+				readAll.type = "button";
+				readAll.textContent = "全部已读";
+				readAll.hidden = true;
+				readAll.addEventListener("click", (event) => {
+					event.preventDefault();
+					event.stopPropagation();
+					markAllDoneRead();
+				});
+			}
+			// 「全部移入历史」（R-01-026/AC-14）：与窗格段头的同名入口同一动作（逐个确认
+			// 写回 + 先清未读）；非「已完成」组不创建该节点。
+			const doneAll = tone === "completed" ? makeEl("button", "dap-done-all") : null;
+			if (doneAll !== null) {
+				doneAll.type = "button";
+				doneAll.textContent = "全部移入历史";
+				doneAll.hidden = true;
+				doneAll.addEventListener("click", (event) => {
+					event.preventDefault();
+					event.stopPropagation();
+					ackAllDone();
+				});
+			}
 			const empty = makeEl("div", "dap-modal-empty");
 			empty.textContent = "暂无";
 			empty.hidden = true;
 			const items = makeEl("div", "dap-modal-group-items");
 			items.hidden = true;
 			groupHead.append(groupTitle, count);
+			if (readAll !== null) groupHead.append(readAll);
+			if (doneAll !== null) groupHead.append(doneAll);
 			group.append(groupHead, empty, items);
 			// byId 记录该组当前持有的条目节点（entry.id → 复用单元），跨轮复用与回收的依据。
-			groups.set(tone, { count, empty, items, byId: new Map() });
+			groups.set(tone, { count, empty, items, readAll, doneAll, byId: new Map() });
 			body.append(group);
 		}
 		dialog.append(head, body);
@@ -2506,6 +2732,23 @@ function apply(ctx) {
 			rec.count.toggleAttribute("data-zero", entries.length === 0);
 			rec.empty.hidden = entries.length > 0;
 			rec.items.hidden = entries.length === 0;
+			// 「全部已读」按钮（R-01-026/AC-13）：只在「已完成」组且仍有未读条目时显示，
+			// 按钮文案带未读数，读屏与悬停提示同源。
+			if (rec.readAll != null) {
+				const unreadCount = entries.filter((entry) => entry.unread === true).length;
+				const labelText = `全部标记为已读（${unreadCount}）`;
+				rec.readAll.hidden = unreadCount === 0;
+				if (rec.readAll.getAttribute("aria-label") !== labelText) rec.readAll.setAttribute("aria-label", labelText);
+				if (rec.readAll.title !== labelText) rec.readAll.title = labelText;
+			}
+			// 「全部移入历史」按钮（R-01-026/AC-14）：与未读无关——组里有条目即可整批确认，
+			// 条数为 0 时整枚隐藏；可访问名称给出本组条数。
+			if (rec.doneAll != null) {
+				const labelText = `全部标记为已读并移入历史（${entries.length}）`;
+				rec.doneAll.hidden = entries.length === 0;
+				if (rec.doneAll.getAttribute("aria-label") !== labelText) rec.doneAll.setAttribute("aria-label", labelText);
+				if (rec.doneAll.title !== labelText) rec.doneAll.title = labelText;
+			}
 			// 先回收本轮不再出现的条目节点（会话落定/归档后不再属于该组），再按序就位。
 			// 顺序不可颠倒：残留节点若还占着位置，下面的 ref 比对会误判成「顺序变了」，
 			// 把悬停中的行也移除再插回，白丢一次 :hover。
@@ -2540,6 +2783,29 @@ function apply(ctx) {
 					item.ws.textContent = wsText;
 				}
 				item.ws.hidden = wsText === "";
+				// 已读/未读标识（R-01-026/AC-09～AC-12）：只有「已完成」组的条目带 unread
+				// 语义——状态文本写「未读」或空串（配 CSS 的空状态胶囊）、行上挂
+				// data-unread 驱动状态点实心/空心与标题字重；其余分组一律摘属性、隐藏文本，
+				// 与运行中/需要交互的既有呈现完全一致（不影响其它状态的展示）。
+				const unread = tone === "completed" ? entry.unread === true : null;
+				if (unread === null) {
+					item.el.removeAttribute("data-unread");
+					item.state.hidden = true;
+					if (item.state.textContent !== "") {
+						item.state.textContent = "";
+					}
+				} else {
+					// 属性存在即未读（与窗格卡片的 toggleAttribute 同一语义）；已读移除属性，
+					// 由 CSS 的 :not([data-unread]) 切换到空心状态点。
+					item.el.toggleAttribute("data-unread", unread);
+					const stateText = unread ? "未读" : "已读";
+					if (item.state.textContent !== stateText) {
+						item.state.textContent = stateText;
+					}
+					item.state.hidden = false;
+				}
+				// 无需再写 aria-label：状态文本是按钮内的真实文本节点，读屏会把它并入
+				// 条目的可访问名（「会话标题 未读」），语义与视觉一致且不新增属性。
 				// 只有顺序真正变化时才移动 DOM（与卡片区同一条纪律）：ref 与自身相等
 				// 即位置未变，此时不碰 DOM——悬停中的条目不会被移除再插回。
 				const ref = rec.items.children[index] ?? null;
@@ -3837,8 +4103,24 @@ function apply(ctx) {
 		const scroll = pane.querySelector(".dap-scroll");
 		const topBtn = pane.querySelector(".dap-top");
 		const recentMore = pane.querySelector(".dap-recent-more");
+		const readAllBtn = pane.querySelector(".dap-done-head .dap-read-all");
+		const doneAllBtn = pane.querySelector(".dap-done-head .dap-done-all");
 		const onRecentMoreClick = () => {
 			if (loadMoreRecent() && recentMore !== null) recentMore.disabled = true;
+		};
+		// 一键已读（R-01-026/AC-13）：点击不触发任何会话跳转，也不解除完成提醒——
+		// 只把「已完成」分区里仍未读的条目一次标记为已读。
+		const onReadAllClick = (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+			markAllDoneRead();
+		};
+		// 全部移入历史（R-01-026/AC-14）：与卡片「移入历史」同一枚确认写回，逐个提交；
+		// 同样不触发任何会话跳转。
+		const onDoneAllClick = (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+			ackAllDone();
 		};
 		// 标题行整体即收起控件，两端断点一致：桌面折叠为窄条（R-01-011/AC-03）；
 		// 移动端断点解释为收起抽屉，而非折叠窄条（R-01-008/AC-02、R-01-011/AC-06）。
@@ -4120,6 +4402,8 @@ function apply(ctx) {
 		pane.addEventListener("pointerleave", onPanePointerLeave);
 		scroll?.addEventListener("scroll", onScroll, { passive: true });
 		recentMore?.addEventListener("click", onRecentMoreClick);
+		readAllBtn?.addEventListener("click", onReadAllClick);
+		doneAllBtn?.addEventListener("click", onDoneAllClick);
 		topBtn?.addEventListener("click", onTopClick);
 		resize?.addEventListener("pointerdown", onResizeDown);
 		return () => {
@@ -4139,6 +4423,8 @@ function apply(ctx) {
 			pane.removeAttribute("data-pointer-inside");
 			scroll?.removeEventListener("scroll", onScroll);
 			recentMore?.removeEventListener("click", onRecentMoreClick);
+			readAllBtn?.removeEventListener("click", onReadAllClick);
+			doneAllBtn?.removeEventListener("click", onDoneAllClick);
 			if (scrollHideTimer !== null) clearTimeout(scrollHideTimer);
 			topBtn?.removeEventListener("click", onTopClick);
 			densityBtn?.removeEventListener("click", onDensityClick);
@@ -4204,7 +4490,7 @@ function apply(ctx) {
 				<div class="dap-scroll">
 					<div class="dap-list" tabindex="-1"><div class="dap-tracks" aria-hidden="true"></div></div>
 					<div class="dap-done" hidden>
-						<div class="dap-done-head"><span>已完成</span></div>
+						<div class="dap-done-head"><span>已完成</span><button class="dap-read-all" type="button" hidden>全部已读</button><button class="dap-done-all" type="button" hidden>全部移入历史</button></div>
 					</div>
 					<div class="dap-recent">
 						<div class="dap-recent-head"><span>最近历史</span></div>
@@ -5068,7 +5354,10 @@ function apply(ctx) {
 				entry.waitClass === "blocked"
 					? (entry.pendingText ?? "")
 					: entry.waitClass === "done"
-						? "已完成"
+						// 已读/未读是同一完成提醒状态的两个呈现（R-01-026/AC-09～AC-12）：
+						// 未读在胶囊文案上直接标注，已读回落为「已完成」——文字通道与
+						// 圆点/色条/字重/脉冲并列，不只靠颜色区分。文案由 core 单点派生。
+						? doneWaitLabel(entry.unread)
 						: entry.waitClass === "error"
 							? "错误"
 							: "";
@@ -5599,14 +5888,17 @@ function apply(ctx) {
 		const recentTimeText = entry.kind === "recent" ? fmtRecentTime(entry.activityAt) : "";
 		const jobStatusText = entry.kind === "job" ? JOB_STATUS_LABELS[entry.jobStatus] ?? "" : "";
 		const jobKindText = entry.kind === "job" ? jobKindLabel(entry.jobKind) : "";
+		// 完成提醒的已读/未读另以文字进入无障碍名称（R-01-026/AC-10、AC-12）：形状、色条、
+		// 字重与脉冲都是视觉通道，读屏用户只能靠这里取得同一语义。其它等待类别该字段不存在。
+		const unreadText = entry.waitClass === "done" && entry.unread === true ? "未读" : "";
 		rec.el.setAttribute(
 			"aria-label",
 			`${entry.workspaceTitle ? entry.workspaceTitle + " - " : ""}${jobKindText ? jobKindText + "，" : ""}${entry.title}${
 				jobStatusText ? "，" + jobStatusText : ""
 			}${entry.pendingText ? "，" + entry.pendingText : ""
-			}${(entry.waitClass === "done" || entry.waitClass === "error") && entry.noteText ? "，" + entry.noteText : ""}${
-				recentTimeText ? "，" + recentTimeText : ""
-			}`,
+			}${unreadText ? "，" + unreadText : ""}${
+				(entry.waitClass === "done" || entry.waitClass === "error") && entry.noteText ? "，" + entry.noteText : ""
+			}${recentTimeText ? "，" + recentTimeText : ""}`,
 		);
 		renderCardInto(rec.el, entry, colorByWorkspace);
 		// 只有顺序/归属真正变化时才移动 DOM：每次渲染无条件 appendChild 会把所有
@@ -5895,12 +6187,12 @@ function apply(ctx) {
 		// 徽标、可见集合与订阅口径全部沿用 active（与原实现同分子分母）；只有活动区
 		// 实际渲染与状态判定的那几处改用 activeRest。
 		const { done, rest: activeRest } = partitionDoneEntries(active);
-		// 未读/已读标识在同一处注入：游标晚于条目进入时刻即已读。
+		// 未读/已读标识在同一处注入：游标晚于条目进入时刻即已读（判定在 core 单点，
+		// 与角标弹窗、侧栏 glyph 的未读读数共用，R-01-026/AC-09、AC-12）。
 		doneEntriesById.clear();
 		for (const entry of done) {
-			const key = String(entry.id);
-			entry.unread = doneEntryUnread(entry, doneReadById.get(key) ?? null);
-			doneEntriesById.set(key, entry);
+			entry.unread = doneEntryUnread(entry, doneReadById.get(String(entry.id)) ?? null);
+			doneEntriesById.set(String(entry.id), entry);
 		}
 		// 轮内订阅仅对"运行中"会话建立（主会话 + 运行中的子代理），保持在运行中的订阅
 		// 数量 == 运行中会话数量（R-02-004/AC-01）；暂停等待的子代理只显示标题。
@@ -6350,6 +6642,27 @@ function apply(ctx) {
 		if (doneHeadText !== null) {
 			const wantText = doneSection.hidden ? "" : "已完成";
 			if (doneHeadText.textContent !== wantText) doneHeadText.textContent = wantText;
+		}
+		// 一键已读按钮的显隐按「本帧是否还有未读完成条目」（R-01-026/AC-13）：全部已读或
+		// 分区为空时整枚隐藏——没有可标记的对象时不摆一个点了没反应的按钮。
+		const readAllBtn = doneSection.querySelector(".dap-read-all");
+		if (readAllBtn !== null) {
+			const unreadDone = done.filter((entry) => entry.unread === true).length;
+			const readAllLabel = `全部标记为已读（${unreadDone}）`;
+			readAllBtn.hidden = doneSection.hidden || unreadDone === 0;
+			if (readAllBtn.textContent !== "全部已读") readAllBtn.textContent = "全部已读";
+			if (readAllBtn.getAttribute("aria-label") !== readAllLabel) readAllBtn.setAttribute("aria-label", readAllLabel);
+			if (readAllBtn.title !== readAllLabel) readAllBtn.title = readAllLabel;
+		}
+		// 「全部移入历史」入口（R-01-026/AC-14）：分区里有完成提醒就显示（与未读无关——
+		// 未读的卡也能被一次确认掉），可访问名称给出条数；分区为空时整枚隐藏。
+		const doneAllBtn = doneSection.querySelector(".dap-done-all");
+		if (doneAllBtn !== null) {
+			const doneAllLabel = `全部标记为已读并移入历史（${done.length}）`;
+			doneAllBtn.hidden = doneSection.hidden || done.length === 0;
+			if (doneAllBtn.textContent !== "全部移入历史") doneAllBtn.textContent = "全部移入历史";
+			if (doneAllBtn.getAttribute("aria-label") !== doneAllLabel) doneAllBtn.setAttribute("aria-label", doneAllLabel);
+			if (doneAllBtn.title !== doneAllLabel) doneAllBtn.title = doneAllLabel;
 		}
 		const aliveRecent = new Set();
 		// 新增功能三：收起态只停用卡片呈现，卡片逻辑与容器照旧——分页计数、

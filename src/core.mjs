@@ -43,6 +43,15 @@ const PENDING_UNKNOWN_NOTE = "等待你处理后继续";
  *  按钮同排在默认窗格宽度下单行完整可见。 */
 export const ROUND_DONE_NOTE = "继续对话，或移入历史";
 
+/** 完成提醒类型胶囊文案（R-01-002/AC-09、R-01-026/AC-09～AC-11）：已读与未读是同一
+ *  完成提醒状态的两个呈现——未读时在胶囊文案上标注「未读」，已读后回落为「已完成」。
+ *  本函数是唯一派生点：窗格卡片、角标弹窗明细与无障碍名称共用，避免各处各写一份。 */
+export const ROUND_DONE_LABELS = Object.freeze({ read: "已完成", unread: "已完成（未读）" });
+
+export function doneWaitLabel(unread) {
+	return unread === true ? ROUND_DONE_LABELS.unread : ROUND_DONE_LABELS.read;
+}
+
 /** 错误提醒信息截断上限（宿主登记 lastTurnEndError 与客户端渲染共用，C-043）：
  *  错误信息只为提示用户会话出错了，超长正文无展示价值；与提问列表单项上界同量级。 */
 export const ERROR_NOTE_MAX = 120;
@@ -1335,8 +1344,13 @@ export function awaitBadgeStats(entries) {
  *  空/非法输入返回全 0，供「0 值仍常显并置灰」的角标呈现直接使用。 */
 /** 三状态角标的三组条目（计数与明细的唯一归类处）：按 statusBadges 同一口径把活动条目
  *  分成运行中 / 需要交互 / 已完成三组，计数即各组长度——角标的计数与弹窗明细同源，
- *  渲染层不再各自 filter 一遍（避免同口径出现第二份实现）。空/非法输入返回三组空数组。 */
-export function classifyActiveEntries(entries) {
+ *  渲染层不再各自 filter 一遍（避免同口径出现第二份实现）。空/非法输入返回三组空数组。
+ *  已读/未读注入（R-01-026/AC-09～AC-12）：完成提醒的已读游标（doneReadById，
+ *  sessionId → 已读时的 lastTurnEnd）由调用方给出时，completed 组每个条目按
+ *  doneEntryUnread 就地写入 unread 字段——弹窗明细与侧栏 glyph 的「未读」提示因此与
+ *  窗格「已完成」分区同一判定，不再各自持有一份已读账本。未传游标表时行为与
+ *  此前完全一致（不写 unread 字段），既有调用点不受影响。 */
+export function classifyActiveEntries(entries, doneReadById = null) {
 	const running = [];
 	const interaction = [];
 	const completed = [];
@@ -1347,7 +1361,14 @@ export function classifyActiveEntries(entries) {
 		}
 		if (entry?.kind !== "awaiting") continue;
 		if (entry.waitClass === "blocked") interaction.push(entry);
-		else if (entry.waitClass === "done") completed.push(entry);
+		else if (entry.waitClass === "done") {
+			// 已读游标表按 sessionId 取值；条目已带 unread 时沿用既有取值，不覆盖。
+			if (doneReadById !== null && entry.unread === undefined) {
+				const seen = doneReadById.get?.(String(entry.id)) ?? null;
+				entry.unread = doneEntryUnread(entry, seen);
+			}
+			completed.push(entry);
+		}
 	}
 	return { running, interaction, completed };
 }

@@ -3689,7 +3689,8 @@ execFileSync(process.execPath, [join(root, "scripts/build-client.mjs")], {
 	cwd: root,
 	stdio: "pipe",
 });
-const bundle = await readFile(join(root, ".dsh-plugin/client.js"), "utf8");
+// 行尾归一（同 clientSource）：bundle 由 src 拼接而成，Windows 检出下同为 CRLF。
+const bundle = (await readFile(join(root, ".dsh-plugin/client.js"), "utf8")).replace(/\r\n/g, "\n");
 
 // R-01-021/AC-01：档位切换锚定补偿为沉降窗逐帧补偿——dsh 0.2.0 起切回高档位的
 // 窗口经 retain→ready 异步重建，内容分多帧长回，单帧补偿会漏掉后期增长（T-159）。
@@ -3697,7 +3698,10 @@ assert.ok(
 	bundle.includes("densityAnchorDeadline") && bundle.includes("scrollEl.scrollTop += shiftedTop - pendingDensityAnchor;") && bundle.includes("if (Date.now() > densityAnchorDeadline)"),
 	"档位切换锚定补偿在沉降窗内逐帧执行、仅按窗超时撤除（R-01-021/AC-01，T-159 审核修复回归）",
 );
-const clientSource = await readFile(join(root, "src/client.mjs"), "utf8");
+// 行尾归一：仓库在 Windows 检出（core.autocrlf=true）下 src 为 CRLF，断言里的多行片段
+// 一律以 LF 书写——不归一会让「含换行的源码断言」在 Windows 上整类失效（实测 3749 行
+// 的 onHeaderActivate 断言即因此失败，而代码本身从未改动）。
+const clientSource = (await readFile(join(root, "src/client.mjs"), "utf8")).replace(/\r\n/g, "\n");
 assert.ok(
 	clientSource.includes('lastTurnEndKind: typeof record?.lastTurnEndKind === "string"') &&
 		clientSource.includes('lastTurnEndError: typeof record?.lastTurnEndError === "string"'),
@@ -4594,8 +4598,24 @@ assert.ok(
 	"胶囊图标归属由 waitClass/pendingKind 结构化字段驱动，未知种类不给图标（R-01-002/AC-01、AC-02）",
 );
 assert.ok(
-	bundle.includes('[data-dsh-activity-pane] .dap-card[data-kind="awaiting"] .dap-foot :is(.dap-capsule, .dap-note)'),
-	"三类等待卡的胶囊与正文脉冲由同一 data-wait 作用域规则驱动（R-01-002/AC-08，C-043）",
+	bundle.includes('[data-dsh-activity-pane] .dap-card[data-kind="awaiting"]:not([data-wait="done"]) .dap-foot :is(.dap-capsule, .dap-note),') &&
+		bundle.includes('[data-dsh-activity-pane] .dap-card[data-kind="awaiting"][data-wait="done"][data-unread] .dap-foot :is(.dap-capsule, .dap-note)'),
+	"三类等待卡的胶囊与正文脉冲由同一末行规则驱动（阻塞/错误 + 未读完成）（R-01-002/AC-08，C-043）",
+);
+// 已读的完成提醒停脉冲（R-01-026/AC-11）：完成提醒的脉冲分支必须带 [data-unread] 门控，
+// 已读条目（属性被摘除）不再落在任何脉冲规则内；阻塞/错误提醒没有已读语义、照旧脉冲。
+assert.ok(
+	!bundle.includes('[data-dsh-activity-pane] .dap-card[data-kind="awaiting"] .dap-foot :is(.dap-capsule, .dap-note)') &&
+		!bundle.includes('[data-wait="done"]:not([data-unread]) .dap-foot'),
+	"末行脉冲规则不得存在无门控的等价选择器：已读后必须真正停止闪烁（R-01-026/AC-11）",
+);
+assert.ok(
+	bundle.includes("function doneWaitLabel(unread)") && bundle.includes('unread: "已完成（未读）"'),
+	"完成提醒胶囊文案由 core#doneWaitLabel 单点派生「已完成/已完成（未读）」（R-01-026/AC-09）",
+);
+assert.ok(
+	bundle.includes("? doneWaitLabel(entry.unread)"),
+	"窗格完成提醒卡胶囊接入 doneWaitLabel，未读在文案上直接标注（R-01-026/AC-09）",
 );
 // 语义化提问列表（R-01-002/AC-09，C-064）：单问 ul、多问 ol，动态文本不解析 HTML。
 assert.ok(
@@ -5073,12 +5093,85 @@ assert.ok(
 // R-01-026：三类计数与三组明细收口到 core 的 classifyActiveEntries 单点——一次归类同时
 // 产出条目与计数，渲染层不再 filter 重算同口径副本（statusBadges 复用同一函数）。
 assert.ok(
-	bundle.includes("function classifyActiveEntries(entries)") &&
-		bundle.includes("const groups = classifyActiveEntries(active);") &&
+	bundle.includes("function classifyActiveEntries(entries, doneReadById = null)") &&
+		bundle.includes("const groups = classifyActiveEntries(active, doneReadById);") &&
 		clientSource.includes("badgeEntries = { running: groups.running, interaction: groups.interaction, completed: groups.completed };") &&
 		!clientSource.includes("completed: doneList.length") &&
 		!clientSource.includes('active.filter((entry) => entry.kind === "running")'),
 	"三状态计数与明细取 core#classifyActiveEntries 单点口径，渲染层不自算副本（R-01-026/AC-01）",
+);
+// R-01-026/AC-09～AC-12：已读/未读也收敛到同一单点——归类函数带已读游标入参，
+// 完成提醒条目的 unread 由 core#doneEntryUnread 判定；渲染层不得再自己算一份未读。
+assert.ok(
+	bundle.includes("entry.unread = doneEntryUnread(entry, seen);") &&
+		clientSource.includes("classifyActiveEntries(active, doneReadById)") &&
+		!clientSource.includes("doneEntryUnread(entry, doneReadById.get(key) ?? null)"),
+	"完成提醒的已读/未读判定收敛到 core（窗口渲染层不另持一份判定）（R-01-026/AC-09、AC-12）",
+);
+// R-01-026/AC-11：点击弹窗条目与点击窗格卡片是同一次「我看过了」，两条路径写同一份已读游标。
+assert.ok(
+	clientSource.includes("function openSessionFromBadge(sessionId) {\n\t\tmarkDoneRead(sessionId);"),
+	"侧栏弹窗条目激活同样推进已读游标（R-01-026/AC-11、AC-12）",
+);
+// R-01-026/AC-10：侧栏 glyph 的完成色点带未读提示环，全部已读即摘除。
+assert.ok(
+	clientSource.includes('"data-badge-unread": counts.completedUnread > 0 ? "true" : undefined') &&
+		bundle.includes(".dap-badge-glyph[data-badge-unread]::before"),
+	"侧栏角标按未读完成数给出提示环、归零即摘（R-01-026/AC-10、AC-12）",
+);
+// R-01-026/AC-09：弹窗条目行的状态文本只在「已完成」组出现，其余组摘属性隐藏文本。
+assert.ok(
+	clientSource.includes('const unread = tone === "completed" ? entry.unread === true : null;') &&
+		bundle.includes('const stateText = unread ? "未读" : "已读";'),
+	"弹窗条目已读/未读只作用于「已完成」组，不影响运行中/需要交互（R-01-026/AC-09、AC-12）",
+);
+// R-01-026/AC-13：一键已读——两处段头各一枚入口，都只在有未读项时显示；动作只推进
+// 本地已读游标，不写宿主完成确认账本（不得出现 ack 写回调用）。
+assert.ok(
+	clientSource.includes("function markAllDoneRead() {") &&
+		clientSource.includes('pane.querySelector(".dap-done-head .dap-read-all")') &&
+		clientSource.includes('tone === "completed" ? makeEl("button", "dap-read-all")') &&
+		clientSource.includes("const unreadDone = done.filter((entry) => entry.unread === true).length;") &&
+		clientSource.includes("const unreadCount = entries.filter((entry) => entry.unread === true).length;"),
+	"一键已读入口落在窗格「已完成」分区段头与弹窗「已完成」组段头，两处按未读数显隐（R-01-026/AC-13）",
+);
+assert.ok(
+	bundle.includes("function markAllDoneRead()") &&
+		bundle.includes("if (advanceDoneReadCursor(id, entry)) changed = true;") &&
+		bundle.includes("if (!changed) return;"),
+	"一键已读遍历已读游标逐个推进，无未读项时不写盘、不触发渲染（R-01-026/AC-13）",
+);
+// 一键已读只清未读：不得调用完成确认写回（ackCompletion），否则会连带把卡片迁入历史。
+// 函数体切片：从定义到该函数体闭合的顶格制表符闭括号（本文件缩进为 1 个 tab）。
+// 直接对全文做「定义后 N 字符内不得出现 ackCompletion」会在函数体变长或后面紧跟
+// 其他函数时误判，故锚在函数体本身。
+const markAllDoneReadFrom = clientSource.indexOf("function markAllDoneRead() {");
+const markAllDoneReadBody = clientSource.slice(
+	markAllDoneReadFrom,
+	clientSource.indexOf("\n\t}", markAllDoneReadFrom) + 3,
+);
+assert.ok(
+	markAllDoneReadBody.includes("advanceDoneReadCursor(id, entry)") && !markAllDoneReadBody.includes("ackCompletion"),
+	"一键已读不触发完成确认写回：只清未读、卡片不迁入历史（R-01-026/AC-13）",
+);
+// R-01-026/AC-14：两处段头各一枚「全部移入历史」入口，动作复用卡片上同一枚完成确认
+// 写回（ackCompletion），不新增解除路径；批量确认前先把整批标记为已读。
+assert.ok(
+	clientSource.includes('pane.querySelector(".dap-done-head .dap-done-all")') &&
+		clientSource.includes('tone === "completed" ? makeEl("button", "dap-done-all")') &&
+		clientSource.includes("const doneAllLabel = `全部标记为已读并移入历史（${done.length}）`;") &&
+		clientSource.includes("doneAllBtn.hidden = doneSection.hidden || done.length === 0;") &&
+		clientSource.includes("rec.doneAll.hidden = entries.length === 0;"),
+	"全部移入历史入口落在窗格「已完成」分区段头与弹窗「已完成」组段头，两处按分区条数显隐（R-01-026/AC-14）",
+);
+assert.ok(
+	bundle.includes("function ackAllDone()") &&
+		/function ackAllDone\(\)[\s\S]{0,600}markAllDoneRead\(\);[\s\S]{0,200}ackCompletion\(/.test(clientSource),
+	"全部移入历史复用既有完成确认写回：先整批标记已读、再逐个提交，不新增解除路径（R-01-026/AC-14）",
+);
+assert.ok(
+	!/function ackAllDone\(\)[\s\S]{0,800}fetch\(/.test(clientSource),
+	"全部移入历史不自建网络写回通道，逐条走 ackCompletion 的乐观更新与失败回滚（R-01-026/AC-14）",
 );
 // R-01-026：角标与窗格共用的活动数据派生面不得自带网络通道（PRD「不引入新的 HTTP 轮询」）。
 // 锚在派生段本身：窗格卸载后仍每轮执行的就是它，若在此新增请求即为新增轮询。
