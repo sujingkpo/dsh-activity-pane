@@ -6,7 +6,7 @@ id: T-179
 
 # T-179 修复 T-178 审核发现的宿主对账失效与实时清理判据过弱
 
-状态: active
+状态: completed
 关联: R-01-002、R-01-027
 风险等级: standard
 
@@ -73,4 +73,7 @@ T-178（提交 7ac23d2、8791e44）交付后，两位独立审核方各出一份
 
 ## 终态与证据
 
-（待修复完成后填写）
+- 实现: `src/host.mjs` —— busy 懒回填与孤儿对账两处 `ctx.inject` 回调改取 `childCtx.sessionQuery`；`session/disposed` 不再直接删，改调 `reconcileOrphanRecords('disposed', [id])` 对该 id 做列表复核；`POST /ack` 记录不存在时幂等返回 `{ ok: true, skipped: 'no-record' }` 不写；对账改为同步段先取两张表 id 快照、再 await 会话列表。`src/core.mjs` 新增导出 `reconcileOrphans(ackIds, turnIds, listSessions)`（返回 `{ deleteIds, skipped }`，`skipped` 取 `no-query` / `list-failed` / `empty-corpus` / `null`），宿主只执行其决定。文案同步 `src/host.mjs` 文件头、PRD R-01-002 陈述句、DOMAIN 显示档位、SOLUTION 会话移除对账与确认写回。
+- 测试: `node scripts/check.mjs` 与 `node scripts/host-reconcile.test.mjs` 全绿（已接入 `pnpm check`）。新测试用假 cordis ctx（`inject` 如实用子 Context 回调）与内存版 KvTable 真正跑 `apply()`，六组场景覆盖：启动对账删除孤儿/保留在线、会话全集为空不删、持久化未就绪不删、disposed 但仍在列表不删、真移除才删、确认写回不复活空壳且保留 `lastTurnEnd`/`lastTurnEndKind`/`lastTurnEndError`。另有七条 `reconcileOrphans` 纯函数断言。反向验证已做：临时把 inject 回调改回「当服务对象」的旧写法，测试报 `启动对账应删除不在会话全集内的提醒登记` 失败；恢复后全绿——证明该测试能抓住「运行即抛错」这类缺陷。E2E：`error-reminder`、`completion-sync`、`done-read-state`、`badge-surfaces`、`session-lifecycle` 五个 PASS；`compact-density` 在并发跑时超时一次，孤立重跑 PASS（并发资源竞争，非本次改动）。
+- SOLUTION 对照: 与 SOLUTION「完成确认宿主侧」新增的确认写回幂等与「会话移除对账」两条内部结构、「核心数据与不变量」的会话移除对账不变量一致；追溯索引 R-01-027 行未变。
+- commit: d79af70 🐛 修复(activity-pane): 修正宿主对账的 inject 用法并使实时清理复用会话列表判据
