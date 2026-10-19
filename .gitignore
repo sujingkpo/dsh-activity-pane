@@ -10,3 +10,6 @@ tools/__pycache__/
 .e2e
 .githooks
 .github
+tmp-rc-diff/
+.dsh-ops/
+debug.log
