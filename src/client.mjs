@@ -781,6 +781,9 @@ const CSS = `
 [data-dsh-activity-pane][data-density="medium"] .dap-card[data-kind="awaiting"][data-wait="done"] .dap-confirm {
   margin-left: auto;
 }
+/* 错误提醒卡（C-102）不参与上述收合：错误信息正文是用户判断「是否移入历史」的唯一依据，
+   中间档收掉它会让用户看不见错在哪；卡片沿用基础的「胶囊行 + 正文行」两行结构，
+   「移入历史」按钮由 .dap-note-row 的既有横向排布落在正文行右侧（R-01-002/AC-09、AC-10）。 */
 [data-dsh-activity-pane] .dap-list {
   display: flex;
   flex-direction: column;
@@ -4537,8 +4540,8 @@ function apply(ctx) {
 		return node;
 	}
 
-	/** 完成提醒卡「移入历史」按钮（R-01-002/AC-10，C-040）：默认隐藏，仅完成提醒卡显示；
-	 *  文案本身即可访问名称；点击与键盘激活均不得触发卡片跳转（激活锚点在渲染期绑定）。 */
+	/** 完成提醒卡与错误提醒卡共用的「移入历史」按钮（R-01-002/AC-10，C-040、C-102）：默认隐藏，
+	 *  仅这两类卡显示；文案本身即可访问名称；点击与键盘激活均不得触发卡片跳转（激活锚点在渲染期绑定）。 */
 	function makeConfirmButton() {
 		const button = document.createElement("button");
 		button.type = "button";
@@ -5487,8 +5490,9 @@ function apply(ctx) {
 					// Enter/Space 由按钮原生合成 click；此处阻断其冒泡到卡片 keydown 激活。
 					confirm.addEventListener("keydown", (event) => event.stopPropagation());
 				}
-				// 仅完成提醒（done）卡显示确认按钮；阻塞等待卡隐藏（其解除是真正回答）。
-				confirm.hidden = entry.waitClass !== "done";
+				// 完成提醒（done）与错误提醒（error）两类卡显示确认按钮（R-01-002/AC-10，C-102）：
+				// 两者共用同一枚按钮、同一文案与同一枚 ack 写回；阻塞等待卡隐藏（其解除是真正回答）。
+				confirm.hidden = entry.waitClass !== "done" && entry.waitClass !== "error";
 			}
 		}
 

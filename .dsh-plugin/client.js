@@ -2118,15 +2118,53 @@ function completionReminder(row, completion, isSub = false) {
 }
 
 /**
- * 错误提醒判定（R-01-002/AC-13，C-043）：主会话最近一个回合以不可恢复错误结束
- * （宿主登记的 `lastTurnEndKind === 'error'`）时成立——随新回合结束（kind 被新 reason
- * 覆盖）解除；不消费 ack 游标、无确认按钮；成立与否只依赖宿主持久状态，刷新/重连恢复。
+ * 错误提醒判定（R-01-002/AC-13，C-043、C-102）：主会话最近一个回合以不可恢复错误结束
+ * （宿主登记的 `lastTurnEndKind === 'error'`）且该回合尚未被确认时成立。解除有两条路径：
+ * 随新回合结束（kind 被新 reason 覆盖），或用户显式确认（`ackedAt` 前移，与完成提醒共用
+ * 同一枚 ack 游标与同一条写回通路）。确认只推进 `ackedAt`，不清 `lastTurnEndKind`——
+ * 「该回合以错误结束」这一持久事实因此保留，刷新后仍可判定。成立与否只依赖宿主持久状态。
  * running/阻塞等待/委托周期的呈现抑制由调用方（buildEntries 的 waitClass 判定）处理。
  */
 function errorReminder(row, completion, isSub = false) {
 	if (isSub || !isRecord(row)) return false;
 	const record = isRecord(completion) ? completion : null;
-	return record !== null && record.lastTurnEndKind === "error";
+	if (record === null || record.lastTurnEndKind !== "error") return false;
+	// 与 completionReminder 同一游标比较口径：ackedAt 不可得视为未确认；lastTurnEnd 晚于
+	// ackedAt 才是「回合结束未被确认」。无有效 lastTurnEnd 可比时（旧版本只写 kind 的畸形
+	// 记录）以「是否已确认」兜底——未确认仍提醒、已确认即解除，避免这类记录变成无法清场的
+	// 死卡。判「缺 lastTurnEnd」必须用原值而非 Number() 结果：Number(null) === 0 是有限数，
+	// 会把「缺字段」当成「回合结束于纪元 0」而静默判不成立。
+	const rawLastTurnEnd = record.lastTurnEnd;
+	const lastTurnEnd = rawLastTurnEnd === null || rawLastTurnEnd === undefined ? Number.NaN : Number(rawLastTurnEnd);
+	const rawAckedAt = record.ackedAt;
+	const ackedAt = rawAckedAt === null || rawAckedAt === undefined ? Number.NaN : Number(rawAckedAt);
+	if (!Number.isFinite(lastTurnEnd)) return !Number.isFinite(ackedAt);
+	if (!Number.isFinite(ackedAt)) return true;
+	return lastTurnEnd > ackedAt;
+}
+
+/** 孤儿记录判定（R-01-027/AC-03，C-103）：在给定「会话服务列出的 id 全集」下，返回
+ *  应被清理的记录 id 列表。判据单点：只有 live 为可用的 id 集合时才做判断——`live` 为
+ *  null 表示会话全集不可信（持久化后端尚未挂载时 listSessions 只返回内存会话、可能为空
+ *  数组），此时一条都不返回，宁可留下孤儿也不能误删有效记录（宿主侧对账只负责调用本函数
+ *  与执行删除）。`ids` 允许任意可迭代输入，重复 id 去重后保持首次出现顺序。
+ *  @param {Iterable<string>|null|undefined} ids 待判定记录 id
+ *  @param {Set<string>|null|undefined} live 会话全集 id 集合；null/undefined 表示不可信
+ *  @returns {string[]} 应删除的记录 id */
+function orphanRecordIds(ids, live) {
+	// 空集合一律跳过：`sessionQuery.listSessions` 在持久化后端尚未挂载时只并入内存会话，
+	// 启动瞬间可能返回空数组；若据此删除，会把全部有效记录清空（ackedAt 不可恢复）。
+	if (!(live instanceof Set) || live.size === 0) return [];
+	const out = []
+	const seen = new Set()
+	if (ids === null || ids === undefined) return out
+	for (const raw of ids) {
+		const id = String(raw ?? '')
+		if (id === '' || seen.has(id)) continue
+		seen.add(id)
+		if (!live.has(id)) out.push(id)
+	}
+	return out
 }
 
 /** 错误提醒正文（R-01-002/AC-09、AC-13，C-043）：宿主登记的 lastTurnEndError（截断后
@@ -3680,6 +3718,9 @@ const CSS = `
 [data-dsh-activity-pane][data-density="medium"] .dap-card[data-kind="awaiting"][data-wait="done"] .dap-confirm {
   margin-left: auto;
 }
+/* 错误提醒卡（C-102）不参与上述收合：错误信息正文是用户判断「是否移入历史」的唯一依据，
+   中间档收掉它会让用户看不见错在哪；卡片沿用基础的「胶囊行 + 正文行」两行结构，
+   「移入历史」按钮由 .dap-note-row 的既有横向排布落在正文行右侧（R-01-002/AC-09、AC-10）。 */
 [data-dsh-activity-pane] .dap-list {
   display: flex;
   flex-direction: column;
@@ -7436,8 +7477,8 @@ function apply(ctx) {
 		return node;
 	}
 
-	/** 完成提醒卡「移入历史」按钮（R-01-002/AC-10，C-040）：默认隐藏，仅完成提醒卡显示；
-	 *  文案本身即可访问名称；点击与键盘激活均不得触发卡片跳转（激活锚点在渲染期绑定）。 */
+	/** 完成提醒卡与错误提醒卡共用的「移入历史」按钮（R-01-002/AC-10，C-040、C-102）：默认隐藏，
+	 *  仅这两类卡显示；文案本身即可访问名称；点击与键盘激活均不得触发卡片跳转（激活锚点在渲染期绑定）。 */
 	function makeConfirmButton() {
 		const button = document.createElement("button");
 		button.type = "button";
@@ -8386,8 +8427,9 @@ function apply(ctx) {
 					// Enter/Space 由按钮原生合成 click；此处阻断其冒泡到卡片 keydown 激活。
 					confirm.addEventListener("keydown", (event) => event.stopPropagation());
 				}
-				// 仅完成提醒（done）卡显示确认按钮；阻塞等待卡隐藏（其解除是真正回答）。
-				confirm.hidden = entry.waitClass !== "done";
+				// 完成提醒（done）与错误提醒（error）两类卡显示确认按钮（R-01-002/AC-10，C-102）：
+				// 两者共用同一枚按钮、同一文案与同一枚 ack 写回；阻塞等待卡隐藏（其解除是真正回答）。
+				confirm.hidden = entry.waitClass !== "done" && entry.waitClass !== "error";
 			}
 		}
 

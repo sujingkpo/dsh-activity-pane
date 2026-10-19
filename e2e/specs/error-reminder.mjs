@@ -47,7 +47,10 @@ export default async function errorReminder({ page, url, mock, assert }) {
 	);
 	const pane = page.locator("[data-dsh-activity-pane]");
 	const errorCard = pane.locator(`[role="button"]`).filter({ hasText: TITLE }).first();
-	assert.equal(await pane.getByRole("button", { name: "移入历史" }).count(), 0, "错误提醒不提供完成确认按钮");
+	// R-01-002/AC-10（C-102）：错误提醒卡与完成提醒卡共用同一枚「移入历史」按钮。
+	const errorDismiss = pane.getByRole("button", { name: "移入历史" });
+	assert.equal(await errorDismiss.count(), 1, "错误提醒卡提供「移入历史」按钮（R-01-002/AC-10）");
+	assert.equal(await errorDismiss.isVisible(), true, "错误提醒卡「移入历史」按钮可见（R-01-002/AC-10）");
 	const errorElapsed = await until("错误提醒统计行保留上一轮耗时", () =>
 		errorCard.locator(".dap-token-stats .dap-token-time").textContent().then((text) => (text ?? "").trim() || null),
 	);
@@ -109,4 +112,27 @@ export default async function errorReminder({ page, url, mock, assert }) {
 		errorCard.locator(".dap-await-age").textContent().then((text) => (text ?? "").trim() || null),
 	);
 	assert.match(refreshedErrorAge, RELATIVE_AGE_PATTERN, "错误提醒刷新后仍显示状态年龄（R-01-002/AC-14）");
+
+	// R-01-002/AC-05、AC-10、AC-13（C-102）：错误提醒经确认解除——点「移入历史」后卡片迁入
+	// 最近历史区、活动区不再有它；刷新后仍不在活动区（ackedAt 已持久化，且 lastTurnEndKind
+	// 未被清除，故不是靠抹掉持久事实"骗过"判定）。
+	await pane.getByRole("button", { name: "移入历史" }).first().click();
+	// 同时要求「离开活动区」与「落进最近历史区」：只断言前者的话，acks SSE 快照尚未到达、
+	// 卡片被首次渲染吞掉的瞬间也会成立（审核指出的假通过）。
+	await until("错误提醒经确认后迁入最近历史区", async () => {
+		const regions = await paneRegions(page);
+		return regions !== null && !regions.active.includes(TITLE) && regions.recent.includes(TITLE) ? regions : null;
+	}, 20_000);
+	const dismissedAcks = await activityAcks(page);
+	const dismissedRecord = Object.values(dismissedAcks ?? {}).find(
+		(record) => record?.lastTurnEndKind === "error" && Number.isFinite(record?.ackedAt),
+	);
+	assert.ok(dismissedRecord, "确认后宿主登记仍保留错误回合的结束原因（C-102：不抹除持久事实）");
+	await openApp(page, url);
+	await ensureFullDensity(page);
+	const afterReload = await paneRegions(page);
+	assert.ok(
+		afterReload !== null && !afterReload.active.includes(TITLE) && afterReload.recent.includes(TITLE),
+		"刷新后已确认的错误提醒仍在最近历史区、不回到活动区（R-01-002/AC-05、AC-13）",
+	);
 }

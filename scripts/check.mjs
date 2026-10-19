@@ -47,6 +47,7 @@ import {
 	activeSessionIds,
 	completionReminder,
 	errorReminder,
+	orphanRecordIds,
 	ERROR_NOTE_MAX,
 	ERROR_NOTE_FALLBACK,
 	truncateErrorNote,
@@ -3277,13 +3278,24 @@ assert.deepEqual(
 	"阻塞等待优先于完成提醒呈现",
 );
 
-// ---- R-01-002/AC-13 错误提醒：最近回合以错误结束 → 红色等待卡；随新回合覆盖解除；
-//     无确认按钮（不消费 ack 游标）；刷新恢复；后代/运行抑制；错误信息正文 ----
+// ---- R-01-002/AC-13 错误提醒：最近回合以错误结束 → 红色等待卡；随新回合覆盖解除，
+//     或因用户显式确认而解除（与完成提醒共用同一枚 ack 游标，C-102）；刷新恢复；
+//     后代/运行抑制；错误信息正文 ----
 const errAcks = (lastTurnEndKind, error, ackedAt = null) =>
 	new Map([["sB", { lastTurnEnd: 1000, lastTurnEndKind, lastTurnEndError: error, ackedAt }]]);
 assert.equal(errorReminder({ id: "sB", displayTitle: "旧B" }, { lastTurnEndKind: "error" }, false), true, "error 回合结束即成立");
 assert.equal(errorReminder({ id: "sB", displayTitle: "旧B" }, { lastTurnEndKind: "completed" }, false), false, "正常回合不成立");
-assert.equal(errorReminder({ id: "sB", displayTitle: "旧B" }, { lastTurnEndKind: "error", ackedAt: 99999 }, false), true, "错误提醒不消费 ack 游标（ackedAt 不影响成立）");
+// 确认解除（R-01-002/AC-05、AC-10、AC-13，C-102）：游标比较与 completionReminder 同口径——
+// ackedAt 不可得视为未确认；ackedAt 早于 lastTurnEnd 仍是「新回合结束未被确认」；晚于或等于即已确认。
+assert.equal(errorReminder({ id: "sB", displayTitle: "旧B" }, { lastTurnEnd: 1000, lastTurnEndKind: "error", ackedAt: 500 }, false), true, "确认游标早于回合结束仍成立");
+assert.equal(errorReminder({ id: "sB", displayTitle: "旧B" }, { lastTurnEnd: 1000, lastTurnEndKind: "error", ackedAt: 1000 }, false), false, "确认游标等于回合结束即解除（边界取严格大于）");
+assert.equal(errorReminder({ id: "sB", displayTitle: "旧B" }, { lastTurnEnd: 1000, lastTurnEndKind: "error", ackedAt: 99999 }, false), false, "确认游标晚于回合结束解除错误提醒");
+assert.equal(errorReminder({ id: "sB", displayTitle: "旧B" }, { lastTurnEndKind: "error" }, false), true, "无游标可比时未确认仍提醒");
+assert.equal(errorReminder({ id: "sB", displayTitle: "旧B" }, { lastTurnEndKind: "error", ackedAt: 500 }, false), false, "无 lastTurnEnd 登记时一确认即解除（不产生无法清场的死卡）");
+// 缺字段必须与「纪元 0 时刻」区分：Number(null) === 0 是有限数，若直接用 Number() 结果判定，
+// null 会落到 0 > ackedAt 而静默不成立，与「未确认仍提醒」相反（审核发现，防御分支口径）。
+assert.equal(errorReminder({ id: "sB", displayTitle: "旧B" }, { lastTurnEnd: null, lastTurnEndKind: "error", ackedAt: null }, false), true, "lastTurnEnd 为 null 视为缺登记，未确认仍提醒");
+assert.equal(errorReminder({ id: "sB", displayTitle: "旧B" }, { lastTurnEnd: null, lastTurnEndKind: "error", ackedAt: 500 }, false), false, "lastTurnEnd 为 null 且已确认时解除");
 assert.equal(errorReminder({ id: "sB", displayTitle: "旧B" }, null, false), false, "无登记不成立（升级不回溯补发错误提醒）");
 assert.equal(errorReminder({ id: "m-c1", parentId: "m", origin: "subagent", displayTitle: "子S" }, { lastTurnEndKind: "error" }, true), false, "子代理不产生错误提醒");
 const errEntries = buildEntries(holdSnap, [], {}, errAcks("error", "The engine is currently overloaded, please try again later"));
@@ -3319,8 +3331,9 @@ assert.deepEqual(
 	"错误提醒中会话不入历史区（分区不变量，R-01-010/AC-06）",
 );
 // 优先级：同一登记上 error 优先于 done（lastTurnEndKind 为 error 时兼有未确认完成）。
+// 游标取 500（早于 lastTurnEnd 1000）：两类提醒此时都成立，取错误提醒呈现。
 assert.deepEqual(
-	buildEntries(holdSnap, [], {}, errAcks("error", "boom", 1000)).map((e) => [e.id, e.waitClass]),
+	buildEntries(holdSnap, [], {}, errAcks("error", "boom", 500)).map((e) => [e.id, e.waitClass]),
 	[["sB", "error"]],
 	"错误提醒优先于完成提醒呈现（C-043）",
 );
@@ -3335,7 +3348,19 @@ assert.deepEqual(
 	"新回合正常结束后错误提醒覆盖解除：未确认时转为完成提醒（绿卡）",
 );
 const clearedErrAcked = buildEntries(holdSnap, [], {}, errAcks("completed", null, 2000));
-assert.deepEqual(clearedErrAcked.map((e) => [e.id, e.kind]), [], "新回合正常结束且已确认后完全退出活动区（错误提醒无确认按钮语义）");
+assert.deepEqual(clearedErrAcked.map((e) => [e.id, e.kind]), [], "新回合正常结束且已确认后完全退出活动区");
+// 错误提醒经确认解除（R-01-002/AC-05、AC-13，C-102）：确认只推进 ackedAt，不清 lastTurnEndKind，
+// 因此「该回合以错误结束」的事实仍在，但错误提醒不再成立、卡片落回最近历史区。
+assert.deepEqual(
+	buildEntries(holdSnap, [], {}, errAcks("error", "boom", 2000)).map((e) => [e.id, e.waitClass ?? e.kind]),
+	[],
+	"错误提醒经确认后退出活动区（不再产出活动条目）",
+);
+assert.deepEqual(
+	buildRecent(holdSnap, [], NOW, {}, [], errAcks("error", "boom", 2000)).map((e) => e.id),
+	["sB"],
+	"错误提醒经确认后落入最近历史区（与完成提醒同一迁移语义）",
+);
 // 委托周期抑制：后代活动期间错误提醒不生效。
 const delegErrMix = { ids: ["root", "root-c1"], byId: { root: holdBase, "root-c1": { id: "root-c1", displayTitle: "子S", parentId: "root", origin: "subagent", running: true } }, current: null };
 const delegErrAcks = new Map([["root", { lastTurnEnd: 1000, lastTurnEndKind: "error", lastTurnEndError: "boom", ackedAt: null }]]);
@@ -3797,8 +3822,27 @@ assert.ok(
 		bundle.includes('[data-dsh-activity-pane][data-density="medium"] .dap-card[data-kind="awaiting"][data-wait="done"] :is(.dap-await-head, .dap-note-row)') &&
 		bundle.includes('[data-dsh-activity-pane][data-density="medium"] .dap-card[data-kind="awaiting"][data-wait="done"] .dap-note') &&
 		bundle.includes('[data-dsh-activity-pane][data-density="medium"] .dap-card[data-kind="awaiting"][data-wait="done"] .dap-confirm'),
-	"中间档完成提醒卡末行经 data-wait 作用域 CSS 收合为单行——横向 foot、包裹层 display:contents、正文隐藏、按钮 margin-left:auto 居右（R-01-021/AC-08）",
+	"中间档完成提醒卡末行经 data-wait=\"done\" 作用域 CSS 收合为单行——横向 foot、包裹层 display:contents、正文隐藏、按钮 margin-left:auto 居右（R-01-021/AC-08）",
 );
+// 反向：错误卡（C-102）不得进入收合作用域——错误正文是清场依据，中间档必须保留两行结构。
+// 不锁具体写法：把中间档整块 CSS 按选择器切开，任何选择器只要同时出现 medium 档作用域与
+// data-wait="error"（引号/空格写法不限），即判为把错误卡卷进了档位裁剪（审核指出字符串
+// includes 可被「逗号无空格」「花括号前无空格」等等价写法绕过）。
+const mediumCardRules = (() => {
+	const marker = '[data-dsh-activity-pane][data-density="medium"] .dap-card'
+	const rules = []
+	let from = 0
+	for (;;) {
+		const start = bundle.indexOf(marker, from)
+		if (start === -1) break
+		const brace = bundle.indexOf('{', start)
+		rules.push(brace === -1 ? bundle.slice(start) : bundle.slice(start, brace))
+		from = brace === -1 ? bundle.length : brace
+	}
+	return rules
+})()
+const errorScopedRules = mediumCardRules.filter((rule) => /data-wait\s*=\s*["']?error/.test(rule))
+assert.deepEqual(errorScopedRules, [], "错误提醒卡不参与中间档收合——错误信息正文必须保留，按钮落在正文行右侧（R-01-002/AC-09、AC-10，C-102）");
 assert.ok(bundle.includes("writeStoredDensity(densityLevel)"), "显示档位切换持久化于 localStorage（R-01-021/AC-06）");
 // R-01-025 档位资源纪律：紧凑档数据面门控与渲染面跳写的 bundle 契约
 assert.ok(
@@ -4160,7 +4204,10 @@ assert.ok(
 	bundle.includes('confirm.addEventListener("click"') && bundle.includes("event.stopPropagation()") && bundle.includes("confirm.addEventListener(\"keydown\", (event) => event.stopPropagation())") && bundle.includes('ackCompletion(id)'),
 	"按钮点击/键盘激活写回 ack 且阻断卡片跳转（R-01-002/AC-10）",
 );
-assert.ok(bundle.includes('confirm.hidden = entry.waitClass !== "done"'), "仅完成提醒卡显示「移入历史」按钮，阻塞等待卡不显示（R-01-002/AC-10）");
+assert.ok(
+	bundle.includes('confirm.hidden = entry.waitClass !== "done" && entry.waitClass !== "error"'),
+	"完成提醒卡与错误提醒卡共用「移入历史」按钮、阻塞等待卡不显示（R-01-002/AC-10，C-102）",
+);
 assert.ok(bundle.includes("new window.EventSource(`${PANE_API_BASE}/acks/stream`)"), "完成确认状态经 SSE 通道订阅（R-01-002/AC-11、AC-12）");
 // R-01-002/AC-12 缺陷回归：移动 PWA 后台恢复后 ack 通道必须自愈（EventSource CLOSED/半开
 // 不再自动重连），否则完成等待中的会话被误判入历史区直至整页重载。
@@ -5203,6 +5250,88 @@ assert.ok(
 assert.ok(
 	bundle.includes("} else if (nextSeat !== seat) {") && bundle.includes("流式观察者换绑到新节点"),
 	"宿主原地替换槽容器时流式观察者换绑到新节点，不留已分离旧节点（借鉴 -mig 并行实现）",
+);
+
+// ---- R-01-027 会话移除后的宿主记录对账清理（C-103）----
+// 启动对账（AC-03）：domain 打开后以会话全集为唯一判据逐条删除孤儿；列表读取失败即整体跳过。
+assert.ok(
+	/void reconcileOrphanRecords\('startup'\)/.test(hostSource),
+	"domain 打开后触发一次启动对账（R-01-027/AC-03）",
+);
+assert.ok(
+	/async function reconcileOrphanRecords\(reason\)[\s\S]{0,1200}await sessionQuery\.listSessions\(\)/.test(hostSource),
+	"对账以会话服务全集为唯一权威判据，不用归档集合或本地缓存（R-01-027/AC-03、AC-04）",
+);
+assert.ok(
+	!/async function reconcileOrphanRecords\(reason\)[\s\S]{0,1600}archivedSessionIds/.test(hostSource),
+	"对账不读归档集合：归档不是移除，记录必须保留（R-01-027/AC-04）",
+);
+assert.ok(
+	/async function reconcileOrphanRecords\(reason\)[\s\S]{0,1600}catch \(error\)/.test(hostSource),
+	"列表读取失败时对账整体跳过并记 warn，宁可留下孤儿也不误删有效记录（R-01-027/AC-03）",
+);
+// 实时清理（AC-02）：会话移除的实时信号上只删该 id 的记录，删除后经既有 SSE 收敛。
+assert.ok(
+	/ctx\.on\('session\/disposed',\s*\(session\)\s*=>\s*\{[\s\S]{0,300}dropSessionRecords\(id, 'disposed'\)/.test(hostSource),
+	"会话移除时实时删除两张表中属于它的记录（R-01-027/AC-02）",
+);
+assert.ok(
+	/async function dropSessionRecords\(id, reason\)[\s\S]{0,700}acks\.delete\(id\)[\s\S]{0,200}turnStats\.delete\(id\)/.test(hostSource),
+	"删除覆盖提醒登记与累计运行时长记账两张表（R-01-027/AC-02）",
+);
+assert.ok(
+	/async function dropSessionRecords\(id, reason\)[\s\S]{0,900}broadcast\(\)[\s\S]{0,80}broadcastBusy\(\)/.test(hostSource),
+	"删除后经既有推送通道让各客户端收敛，不新增通道（R-01-027/AC-02）",
+);
+assert.ok(
+	/async function dropSessionRecords\(id, reason\)[\s\S]{0,500}catch \(error\)[\s\S]{0,200}return/.test(hostSource),
+	"单条删除失败只记 warn 并返回，不阻断其余记录（R-01-027/AC-03）",
+);
+// 判定单点的行为级断言（R-01-027/AC-03、AC-04）：不可信集合一律不删——这是防「启动瞬间
+// 会话全集为空导致两张表被清空」的唯一硬保护，源码正则证明不了，必须走真实调用。
+assert.deepEqual(orphanRecordIds(["a", "b"], new Set()), [], "空会话全集不下任何判断：一条都不删（持久化后端未挂载时 listSessions 可能返回空数组）");
+assert.deepEqual(orphanRecordIds(["a", "b"], null), [], "会话全集不可得（null）时不删任何记录");
+assert.deepEqual(orphanRecordIds(["a", "b"], undefined), [], "会话全集缺失（undefined）时不删任何记录");
+assert.deepEqual(orphanRecordIds(["a", "b"], new Set(["a"])), ["b"], "只在全集内缺席的 id 被判为孤儿");
+assert.deepEqual(orphanRecordIds([], new Set(["a"])), [], "没有记录时不产出删除项");
+assert.deepEqual(orphanRecordIds(["a", "a", "b"], new Set(["a"])), ["b"], "重复 id 去重且保持首次出现顺序");
+assert.deepEqual(orphanRecordIds(["", "a"], new Set(["a"])), [], "空 id 不参与判定");
+assert.deepEqual(orphanRecordIds(null, new Set(["a"])), [], "记录集合不可得时不删任何记录");
+assert.deepEqual(orphanRecordIds(new Set(["a", "b"]), new Set(["a", "b"])), [], "全部会话仍在时清空动作不发生");
+// 对账必须经该单点判定，且不得在判定之前自行删除（防止绕开空集合保护）。
+assert.ok(
+	/orphanRecordIds\(ackIds, live\)/.test(hostSource) && /orphanRecordIds\(turnIds, live\)/.test(hostSource),
+	"两张表的删除都经孤儿判定单点产出（R-01-027/AC-03）",
+);
+assert.ok(
+	/live\.size === 0\)[\s\S]{0,200}return/.test(hostSource),
+	"会话全集为空时对账整体跳过并记 warn——宁可留下孤儿也不清空有效记录（R-01-027/AC-03）",
+);
+// 持久化面未就绪时同样跳过：只用一个「刚恢复的内存会话」当全集，会把其余会话的记录全判成孤儿。
+assert.ok(
+	/ctx\.get\?\.\('sessionPersistence'\)[\s\S]{0,300}return/.test(hostSource),
+	"会话持久化未挂载时对账整体跳过——防止以不完整的会话全集误删记录（R-01-027/AC-03）",
+);
+assert.ok(
+	hostSource.indexOf("sessionPersistence") < hostSource.indexOf("await sessionQuery.listSessions()"),
+	"持久化就绪判断发生在会话全集读取之前（顺序即防线，R-01-027/AC-03）",
+);
+// 确认写回保留持久事实（C-102）：只推进 ackedAt，不清 lastTurnEndKind / lastTurnEndError。
+assert.ok(
+	/ackedAt: Date\.now\(\)/.test(hostSource) &&
+		/lastTurnEndKind: current\?\.lastTurnEndKind \?\? null/.test(hostSource),
+	"确认写回只推进 ackedAt、保留回合结束原因（C-102：错误提醒确认后仍可判定该回合以错误结束）",
+);
+// 会话移除后三区都不显示：buildEntries 与 buildRecent 都只遍历会话服务快照的 ids。
+assert.deepEqual(
+	buildEntries({ ids: [], byId: {} }, [], {}, errAcks("error", "boom")).map((e) => e.id),
+	[],
+	"会话已不在会话服务列表时活动区不产出条目（R-01-027/AC-01）",
+);
+assert.deepEqual(
+	buildRecent({ ids: [], byId: {} }, [], NOW, {}, [], errAcks("error", "boom")).map((e) => e.id),
+	[],
+	"会话已不在会话服务列表时历史区不产出条目（R-01-027/AC-01）",
 );
 
 
