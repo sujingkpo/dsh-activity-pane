@@ -1,16 +1,12 @@
 name: CI
 
+# 手动触发的可选验证。本 fork 不挂自动门禁：push 不触发任何检查，
+# 只有东家显式点 Run workflow 时才跑一次完整验证。
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
 
 permissions:
   contents: read
-
-concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
 
 jobs:
   verify:

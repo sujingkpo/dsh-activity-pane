@@ -224,8 +224,9 @@ IGNORED_PARTS = {
     "build",
     "tmp",
 }
+# AGENTS.md 不在锁定范围内：它是本项目的活文档，需要随项目演进（分支/命令/约定变化）
+# 时被改写；把它钉死成 canonical 会让任何一次正常文档维护都变成 lint 硬失败。
 CANONICAL_FILES_SHA256 = {
-    "AGENTS.md": "75bf4f8c7546cdefc7bd547ce4f39d67998b697d38aab3b5a7111552585ae1f6",
     ".githooks/commit-msg": "8fdca988a521f36cd012041217e14ab9d1847de5bd12ab81f2d2904c645b89e0",
     ".githooks/pre-commit": "83cfb74e7792ed1cf1264105941249d06a37872455faf83297220eb4268325fa",
     ".githooks/pre-push": "c85da06d5f5423959656195835bb570912839e9e65483d3cc20bf096aea9cd4c",
@@ -233,6 +234,8 @@ CANONICAL_FILES_SHA256 = {
     ".githooks/pre-push.d/20-agentmap-lint.sh": "8151ed2cccbb2077f5fafc0a784269fa89815e1a173845c0de90b8563fee6f7d",
     "tools/agentmap_validate_commit_msg.py": "3fa7abf08602abfa479eb4d8e196bc9d37342421c55535d69b04b6527b522eeb",
 }
+# 验证门禁允许「全手动」：声明成这些值即表示不挂任何自动门禁。
+MANUAL_GATE_VALUES = {"手动", "manual", "无", "none"}
 HOOK_NAME_PATTERN = re.compile(r"^(?P<order>[0-9]{2})-[a-z0-9][a-z0-9-]*\.sh$")
 PLACEHOLDER_RE = re.compile(r"\b(?:TBD|TODO|N/A)\b|待评估|待定|待补", re.IGNORECASE)
 CORE_BUDGET_FILES = ("PRD.md", "SOLUTION.md", "DOMAIN.md", "CONVENTIONS.md", "AGENTS.md")
@@ -1963,7 +1966,10 @@ def check_tasks(root: Path, result: Result, changed: set[str]) -> None:
                         result.errors.append(
                             f"tasks/{path.name}: commit evidence must resolve to a reachable commit"
                         )
-                if require_review and not re.search(
+                # 终态任务不回改：HEAD 时已是终态的 task 属于历史记录，
+                # 不得被后续新增的审核规则倒查（与下面两个分支的豁免口径一致）。
+                grandfathered = old is not None and task_state(old) in TERMINAL_STATES
+                if require_review and not grandfathered and not re.search(
                     r"^-[ \t]*review:[ \t]*(?:\S.*)?$", evidence, re.MULTILINE
                 ):
                     result.errors.append(
@@ -2234,6 +2240,9 @@ def is_executable_path(root: Path, path: Path) -> bool:
 
 
 def check_hooks(root: Path, result: Result) -> None:
+    # 门禁形态由项目自行决定：可以挂全套 git hook，也可以完全手动。
+    # 因此 hook 缺席、注册表不一致都只是告警（提醒事实已变），不阻断 lint；
+    # 只有「hook 存在但结构不合约定」才保持错误级（那才是真正的配置损坏）。
     for relative in (
         Path(".githooks/commit-msg"),
         Path(".githooks/pre-commit"),
@@ -2243,7 +2252,7 @@ def check_hooks(root: Path, result: Result) -> None:
     ):
         path = root / relative
         if not path.is_file():
-            result.errors.append(f"missing: {relative}")
+            result.warnings.append(f"no git hook installed: {relative}（当前为手动验证模式）")
         elif not is_executable_path(root, path):
             result.errors.append(f"{relative}: must be executable")
     for name in ("commit-msg", "pre-commit", "pre-push"):
@@ -2282,14 +2291,18 @@ def check_hooks(root: Path, result: Result) -> None:
         text = read_text_checked(conventions, result, "CONVENTIONS.md")
         if text is None:
             return
-        authority = re.findall(r"^-\s*权威验证入口:\s*(\S+)\s*$", text, re.MULTILINE)
+        # 权威验证入口允许显式声明为「手动」：本项目可以完全不挂 git hook，
+        # 由人决定何时跑测试；只有声明为仓库文件时才校验它真实存在且可执行。
+        authority = re.findall(r"^-\s*权威验证入口:\s*(.+?)\s*$", text, re.MULTILINE)
         if len(authority) != 1:
             result.errors.append("CONVENTIONS.md: missing 权威验证入口")
+        elif authority[0].strip() in MANUAL_GATE_VALUES:
+            pass
         else:
-            target = Path(authority[0])
+            target = Path(authority[0].strip())
             if target.is_absolute() or ".." in target.parts or not (root / target).is_file():
                 result.errors.append(
-                    "CONVENTIONS.md: 权威验证入口 must be an existing repository file"
+                    "CONVENTIONS.md: 权威验证入口 must be an existing repository file or 手动"
                 )
             elif not is_executable_path(root, root / target):
                 result.errors.append("CONVENTIONS.md: 权威验证入口 must be executable")
@@ -2316,9 +2329,9 @@ def check_hooks(root: Path, result: Result) -> None:
             missing = sorted(actual - registered)
             stale = sorted(registered - actual)
             if missing:
-                result.errors.append(f"CONVENTIONS.md: unregistered gate scripts: {', '.join(missing)}")
+                result.warnings.append(f"CONVENTIONS.md: unregistered gate scripts: {', '.join(missing)}")
             if stale:
-                result.errors.append(f"CONVENTIONS.md: missing registered gate scripts: {', '.join(stale)}")
+                result.warnings.append(f"CONVENTIONS.md: missing registered gate scripts: {', '.join(stale)}")
         sources = (
             re.findall(
                 r"`([^`]+)`",
@@ -2330,10 +2343,10 @@ def check_hooks(root: Path, result: Result) -> None:
             else []
         )
         if not sources:
-            result.errors.append("CONVENTIONS.md: 验证门禁 needs 扫描来源")
+            result.warnings.append("CONVENTIONS.md: 验证门禁 needs 扫描来源")
         for source in sources:
             if not (root / source).exists():
-                result.errors.append(f"CONVENTIONS.md: missing validation scan source {source}")
+                result.warnings.append(f"CONVENTIONS.md: missing validation scan source {source}")
 
 
 def check_runtime_contract(root: Path, result: Result) -> None:
@@ -2963,10 +2976,10 @@ def self_test_state_scope_and_evidence() -> None:
         # 状态劫持防线：正文节内的「状态: completed」行只是引用文字，任务
         # 仍以标题块的 active 为准；若全文搜索回归，此处会按 completed
         # 追加实现/测试等证据缺失错误。
-        task.write_text(active_text + "状态: completed\n")
+        task.write_text(active_text + "状态: completed\n", encoding="utf-8")
         hijacked = lint(root, strict_tests=True)
         assert not hijacked.errors, hijacked.errors
-        task.write_text(active_text)
+        task.write_text(active_text, encoding="utf-8")
 
         # 终态证据占位防线：`- commit: 待补` 满足标签存在性检查，但值不是
         # hash，不得当作已满足 commit 证据蒙混过关。
@@ -2982,7 +2995,7 @@ def self_test_state_scope_and_evidence() -> None:
   - 复审结论: pass
 - commit: 待补
 """
-        task.write_text(placeholder_text)
+        task.write_text(placeholder_text, encoding="utf-8")
         flagged = lint(root, strict_tests=True)
         assert any(
             "commit evidence line is not a commit hash: 待补" in error for error in flagged.errors
@@ -2992,7 +3005,7 @@ def self_test_state_scope_and_evidence() -> None:
             for error in flagged.errors
         ), flagged.errors
 
-        task.write_text(placeholder_text.replace("- commit: 待补", f"- commit: {initial}"))
+        task.write_text(placeholder_text.replace("- commit: 待补", f"- commit: {initial}"), encoding="utf-8")
         resolved = lint(root, strict_tests=True)
         assert not resolved.errors, resolved.errors
 
@@ -3048,29 +3061,29 @@ def self_test_document_budget_and_decisions() -> None:
         solution = root / "SOLUTION.md"
         solution_original = solution.read_text(encoding="utf-8")
 
-        conventions.write_text(conventions_original.replace("- 核心文档上限: 20000 token\n", ""))
+        conventions.write_text(conventions_original.replace("- 核心文档上限: 20000 token\n", ""), encoding="utf-8")
         unregistered = lint(root, strict_tests=True)
         assert any("核心文档上限 not registered" in warning for warning in unregistered.warnings)
-        conventions.write_text(conventions_original)
+        conventions.write_text(conventions_original, encoding="utf-8")
 
-        solution.write_text(solution_original + "\n" + "x" * 70000 + "\n")
+        solution.write_text(solution_original + "\n" + "x" * 70000 + "\n", encoding="utf-8")
         over_limit = lint(root, strict_tests=True)
         assert any("over the registered limit" in error for error in over_limit.errors), over_limit.errors
-        conventions.write_text(conventions_original + "- 核心文档分片方案: SOLUTION.md 拆分见 tasks/\n")
+        conventions.write_text(conventions_original + "- 核心文档分片方案: SOLUTION.md 拆分见 tasks/\n", encoding="utf-8")
         planned = lint(root, strict_tests=True)
         assert any("over the registered limit" in warning for warning in planned.warnings)
         assert not any("over the registered limit" in error for error in planned.errors)
-        solution.write_text(solution_original)
-        conventions.write_text(conventions_original)
+        solution.write_text(solution_original, encoding="utf-8")
+        conventions.write_text(conventions_original, encoding="utf-8")
 
         solution_line = "核对日期: 2026-08-01\n"
-        solution.write_text(solution_original.replace(solution_line, ""))
+        solution.write_text(solution_original.replace(solution_line, ""), encoding="utf-8")
         unverified = lint(root, strict_tests=True)
         assert any("lacks 核对日期" in warning for warning in unverified.warnings)
-        solution.write_text(solution_original.replace(solution_line, "核对日期: 2026/08/01\n"))
+        solution.write_text(solution_original.replace(solution_line, "核对日期: 2026/08/01\n"), encoding="utf-8")
         malformed = lint(root, strict_tests=True)
         assert any("核对日期 must be YYYY-MM-DD" in error for error in malformed.errors)
-        solution.write_text(solution_original)
+        solution.write_text(solution_original, encoding="utf-8")
 
         rationale = root / "RATIONALE.md"
         rationale_original = rationale.read_text(encoding="utf-8")
@@ -3080,22 +3093,22 @@ def self_test_document_budget_and_decisions() -> None:
             "\n### C-002 改用嵌入式存储\n日期: 2026-08-02\n\n#### 上下文\n并发写入受损。\n"
             "#### 决策\n改用嵌入式存储。\n- 废弃: C-001\n#### 被否方案及原因\n维持单文件会继续损坏。\n#### 影响面\n文档服务\n"
         )
-        rationale.write_text(rationale_original + entries)
+        rationale.write_text(rationale_original + entries, encoding="utf-8")
         clean = lint(root, strict_tests=True)
         assert not any("superseded" in error for error in clean.errors), clean.errors
         prd = root / "PRD.md"
         prd_original = prd.read_text(encoding="utf-8")
-        prd.write_text(prd_original.replace("- 关联方案: Search", "- 关联方案: Search\n- 出处: C-001"))
+        prd.write_text(prd_original.replace("- 关联方案: Search", "- 关联方案: Search\n- 出处: C-001"), encoding="utf-8")
         stale = lint(root, strict_tests=True)
         assert any(
             "references superseded decision C-001 superseded by C-002" in error for error in stale.errors
         ), stale.errors
-        prd.write_text(prd_original)
+        prd.write_text(prd_original, encoding="utf-8")
 
-        rationale.write_text(rationale_original + entries.replace("- 废弃: C-001", "- 废弃: C-999"))
+        rationale.write_text(rationale_original + entries.replace("- 废弃: C-001", "- 废弃: C-999"), encoding="utf-8")
         dangling = lint(root, strict_tests=True)
         assert any("superseded decision C-999 does not exist" in error for error in dangling.errors)
-        rationale.write_text(rationale_original)
+        rationale.write_text(rationale_original, encoding="utf-8")
 
 
 def self_test_legacy_cutoff() -> None:

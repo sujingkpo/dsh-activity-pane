@@ -24,8 +24,12 @@ NONE_REASON_RE = re.compile(r"(?:仅|不变|无需|保持|已由|因为|由于|�
 
 
 def run_git(root, *args, input_text=None, check=True):
+    # encoding 必须显式指定 utf-8：Windows 默认按 GBK 解码子进程输出，
+    # 中文 PRD 内容会抛 UnicodeDecodeError，导致 stdout 为 None、
+    # 上层 parse_acceptance(None) 直接 TypeError 崩溃（本机 100% 复现）。
     result = subprocess.run(
         ["git", *args], cwd=str(root), input=input_text, text=True,
+        encoding="utf-8", errors="replace",
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
     )
     if check and result.returncode != 0:
@@ -36,7 +40,8 @@ def run_git(root, *args, input_text=None, check=True):
 def git_text(root, spec, path):
     result = run_git(root, "show", "%s:%s" % (spec, path), check=False)
     if result.returncode == 0:
-        return result.stdout
+        # 兜底：任何情况下都不把 None 交给正则（errors="replace" 已排除解码失败）
+        return result.stdout or ""
     missing = ("does not exist in", "exists on disk, but not in", "not in the index")
     if any(marker in result.stderr for marker in missing):
         return ""

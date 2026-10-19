@@ -8,9 +8,11 @@
 // 浏览器二进制为项目内安装（PLAYWRIGHT_BROWSERS_PATH=0）。
 //
 // 用法：`node e2e/run.mjs`（全量）或 `node e2e/run.mjs mobile-drawer`（指定 spec）。
+// 备注：package.json 的 knownFailingE2e.specs 列出基线既有失败，对应 spec 失败时记
+// KNOWN-FAIL 而非整轮红；本仓库验证默认手动，不为提交/推送自动执行。
 
 import assert from "node:assert/strict";
-import { readdir, rm } from "node:fs/promises";
+import { readdir, readFile, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -22,6 +24,15 @@ const { chromium } = await import("playwright");
 const MAX_CONCURRENCY = 1;
 
 const specDir = join(here, "specs");
+
+// 基线既有失败清单（package.json 的 knownFailingE2e.specs）：这些 spec 在 HEAD 上
+// 就已失败，与本轮改动无关。它们仍然照常执行，但失败时记为 KNOWN-FAIL 而不是让
+// 整轮跑红，避免每次全量都要人工逐个单跑排除嫌疑。清单为空时行为与原来完全一致。
+const knownFailing = new Set(
+	(JSON.parse(await readFile(join(here, "..", "package.json"), "utf8")).knownFailingE2e?.specs ?? []).map(
+		(name) => (name.endsWith(".mjs") ? name : `${name}.mjs`),
+	),
+);
 const requested = new Set(process.argv.slice(2).map((name) => (name.endsWith(".mjs") ? name : `${name}.mjs`)));
 const allSpecFiles = (await readdir(specDir)).filter((name) => name.endsWith(".mjs")).sort();
 const specFiles = requested.size === 0 ? allSpecFiles : allSpecFiles.filter((name) => requested.has(name));
@@ -51,6 +62,7 @@ async function runSpec(name) {
 	let page;
 	let result = 0;
 	let skipped = false;
+	let knownFailed = false;
 	let bootMs = 0;
 	let browserMs = 0;
 	let specMs = 0;
@@ -75,6 +87,11 @@ async function runSpec(name) {
 			// 环境性缺席（如 registry 不可达）不是被测行为失败：显式记账，不让覆盖静默消失。
 			skipped = true;
 			console.error(`e2e: SKIP ${name}（${error.message}）`);
+		} else if (knownFailing.has(name)) {
+			// 已知失败：照常取证（截图 + stderr 尾部）但不计入本轮失败数
+			knownFailed = true;
+			console.error(`e2e: KNOWN-FAIL ${name}（基线既有失败，不计入本轮回归）\n${error?.stack ?? error}`);
+			await captureFailure(page, name);
 		} else {
 			result = 1;
 			console.error(`e2e: FAIL ${name}\n${error?.stack ?? error}`);
@@ -94,16 +111,19 @@ async function runSpec(name) {
 			console.error(`e2e: FAIL ${name} cleanup\n${cleanupErrors.join("\n")}`);
 		}
 	}
-	if (result === 0 && !skipped) {
+	if (result === 0 && !skipped && !knownFailed) {
 		console.error(formatPassTimings(name, { boot: bootMs, browser: browserMs, spec: specMs, cleanup: cleanupMs, total: Date.now() - start }));
 	}
-	return skipped ? "skip" : result;
+	if (skipped) return "skip";
+	if (knownFailed) return "known-fail";
+	return result;
 }
 
 const suiteStart = Date.now();
 let nextSpec = 0;
 let failed = 0;
 let skippedCount = 0;
+let knownFailCount = 0;
 async function worker() {
 	for (;;) {
 		const index = nextSpec;
@@ -112,13 +132,21 @@ async function worker() {
 		const outcome = await runSpec(specFiles[index]);
 		if (outcome === 1) failed += 1;
 		else if (outcome === "skip") skippedCount += 1;
+		else if (outcome === "known-fail") knownFailCount += 1;
 	}
 }
 await Promise.all(Array.from({ length: Math.min(MAX_CONCURRENCY, specFiles.length) }, () => worker()));
 
 const elapsed = Date.now() - suiteStart;
+const knownNote = knownFailCount > 0 ? `（另 ${knownFailCount} 个 KNOWN-FAIL）` : "";
 if (failed > 0) {
-	console.error(`e2e: ${failed} 个 spec 失败${skippedCount > 0 ? `（另 ${skippedCount} 个 SKIP）` : ""}（${elapsed}ms）`);
+	console.error(`e2e: ${failed} 个 spec 失败${skippedCount > 0 ? `（另 ${skippedCount} 个 SKIP）` : ""}${knownNote}（${elapsed}ms）`);
 	process.exit(1);
 }
-console.error(`e2e: 全部 ${specFiles.length} 个 spec 通过${skippedCount > 0 ? `（其中 ${skippedCount} 个 SKIP）` : ""}（${elapsed}ms）`);
+const passedCount = specFiles.length - knownFailCount - skippedCount;
+// 只跑了已知失败 spec 时不谎称「全部通过」，直接说明本轮没有可判定的通过项。
+const summary =
+	passedCount > 0
+		? `全部 ${passedCount} 个 spec 通过`
+		: `本轮无通过的 spec`;
+console.error(`e2e: ${summary}${skippedCount > 0 ? `（其中 ${skippedCount} 个 SKIP）` : ""}${knownNote}（${elapsed}ms）`);

@@ -9,6 +9,7 @@
 // 用法：`node e2e/boot.mjs` 启动并打印 JSON 就绪信息（调试用，Ctrl+C 清理）；
 // 或被 spec 导入调用 bootE2e()。
 
+import { existsSync } from "node:fs";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { spawn, execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -19,16 +20,73 @@ import { startMockLlm } from "./mock-llm.mjs";
 
 const execFileAsync = promisify(execFile);
 const repoRoot = process.env.E2E_REPO_ROOT ?? join(dirname(fileURLToPath(import.meta.url)), "..");
-// 启动器路径可经环境变量覆盖（E2E_DSH_BIN / E2E_DSH_CLI）：桌面端安装位置随发行渠道
-// 变化（DSH Desktop / DSH NEXT / 自定义目录），默认值保持 CI 与干净机器的既有路径，
-// 本地换渠道时不必改代码。
-const DSH_LAUNCHER = {
-	bin: process.env.E2E_DSH_BIN ?? "C:\\Program Files\\DSH Desktop\\DSH Desktop.exe",
-	prefix: [
-		"--expose-internals",
-		process.env.E2E_DSH_CLI ?? "C:\\Program Files\\DSH Desktop\\resources\\app\\lib\\desktop-cli.js",
-	],
+
+// 桌面端安装位置随发行渠道变化（DSH Desktop / DSH NEXT / 自定义目录）。逐个探测
+// 候选启动器，取第一套 bin 与 cli 同时存在的组合；都探不到时退回第一个候选并给出
+// 可操作的报错，避免「spawn ENOENT」这种看不出该改什么的环境噪声。
+// 探测顺序：显式环境变量 > 已安装渠道 > CI 与干净机器的既有默认路径。
+// 环境变量允许只给一半：缺的那一半回落到默认候选，不会因为只设 E2E_DSH_CLI 就整体失效。
+const ENV_LAUNCHER = {
+	bin: process.env.E2E_DSH_BIN ?? "",
+	cli: process.env.E2E_DSH_CLI ?? "",
+	label: "E2E_DSH_BIN / E2E_DSH_CLI",
 };
+const DSH_LAUNCHER_CANDIDATES = [
+	...(ENV_LAUNCHER.bin || ENV_LAUNCHER.cli ? [ENV_LAUNCHER] : []),
+	{
+		bin: "C:\\Program Files\\DSH NEXT\\DSH NEXT.exe",
+		// DSH NEXT 把 CLI 打进 app.asar，路径仍可被 Electron 直接加载
+		cli: "C:\\Program Files\\DSH NEXT\\resources\\app.asar\\lib\\desktop-cli.js",
+		label: "DSH NEXT",
+	},
+	{
+		bin: "C:\\Program Files\\DSH Desktop\\DSH Desktop.exe",
+		cli: "C:\\Program Files\\DSH Desktop\\resources\\app\\lib\\desktop-cli.js",
+		label: "DSH Desktop",
+	},
+].filter(Boolean);
+
+/** 用后续候选补齐缺项：环境变量只给一半时仍能凑出完整的一组。 */
+const completeLauncher = (candidate) => {
+	const fallback = DSH_LAUNCHER_CANDIDATES.find((item) => item !== candidate) ?? {};
+	return {
+		bin: candidate.bin || fallback.bin || "",
+		cli: candidate.cli || fallback.cli || "",
+		label: candidate.label,
+	};
+};
+
+/**
+ * 判定单个文件是否「存在」。DSH NEXT 把 CLI 打进 app.asar：asar 是文件而不是目录，
+ * existsSync 对 `…/app.asar/lib/desktop-cli.js` 恒为 false，但 Electron 能正常加载它。
+ * 因此 .asar 内的路径改判「asar 容器文件存在」。
+ */
+const fileExists = (target) => {
+	if (!target) return false;
+	if (existsSync(target)) return true;
+	const asarIndex = target.indexOf(".asar");
+	return asarIndex !== -1 && existsSync(target.slice(0, asarIndex + ".asar".length));
+};
+
+/** 判定候选启动器的 bin 与 cli 是否都可用。 */
+const launcherExists = (candidate) => {
+	const { bin, cli } = completeLauncher(candidate);
+	return fileExists(bin) && fileExists(cli);
+};
+
+/** 选中可用启动器；全部缺席时保留第一个候选，由 spawn 暴露真实缺哪个文件。 */
+const DSH_LAUNCHER = (() => {
+	const found = DSH_LAUNCHER_CANDIDATES.find(launcherExists);
+	const picked = completeLauncher(found ?? DSH_LAUNCHER_CANDIDATES[0]);
+	if (!found) {
+		console.error(
+			`e2e: 未找到可用的 DSH 启动器（bin=${picked.bin} cli=${picked.cli}）` +
+				"；可用 E2E_DSH_BIN / E2E_DSH_CLI 指向自定义安装位置",
+		);
+	}
+	return { bin: picked.bin, prefix: ["--expose-internals", picked.cli] };
+})();
+
 const withLauncher = (args) => [...DSH_LAUNCHER.prefix, ...args];
 const launcherEnv = (env) => ({ ...env, ELECTRON_RUN_AS_NODE: "1" });
 

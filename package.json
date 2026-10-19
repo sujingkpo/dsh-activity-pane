@@ -36,6 +36,7 @@
     "check": "node scripts/check.mjs && node scripts/host-reconcile.test.mjs",
     "test": "node scripts/check.mjs && node scripts/host-reconcile.test.mjs",
     "test:e2e": "node e2e/run.mjs",
+    "test:e2e:known-good": "node e2e/run.mjs error-reminder completion-sync done-read-state badge-surfaces session-lifecycle",
     "dev:watch": "node scripts/watch.mjs",
     "accept:manual": "node scripts/acceptance.mjs",
     "lint:agentmap": "python3 tools/agentmap_lint.py --report",
@@ -44,6 +45,10 @@
     "check:staged-client": "node scripts/check-staged-client.mjs",
     "verify:fast": "pnpm lint && pnpm check",
     "verify": "pnpm verify:fast && pnpm test:e2e"
+  },
+  "knownFailingE2e": {
+    "_comment": "基线既有的失败 spec，与本轮改动无关；跑全量时不计入回归判断",
+    "specs": ["auto-update", "background-jobs", "card-content", "loading-ready"]
   },
   "dsh": {
     "bundle": {

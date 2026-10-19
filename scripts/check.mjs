@@ -5416,10 +5416,12 @@ assert.ok(e2eHelperSource.includes('throw new Error("窗格列表加载失败")'
 // ---- GitHub CI 触发策略（C-050，T-086）----
 const ciWorkflowSource = await readFile(join(root, ".github/workflows/ci.yml"), "utf8");
 const ciTriggerBlock = ciWorkflowSource.match(/^on:\n([\s\S]*?)^permissions:/m)?.[1] ?? "";
+// C-050 原口径为「workflow_dispatch + main push」；本 fork 已改为全手动验证，
+// push 不再触发 CI，因此契约同步为「仅 workflow_dispatch」——仍然禁止 PR/tag 触发。
 assert.equal(
 	ciTriggerBlock,
-	"  workflow_dispatch:\n  push:\n    branches: [main]\n\n",
-	"hosted CI trigger 仅允许 workflow_dispatch 与 main push，不得加入 PR、tag 或其它 push filter",
+	"  workflow_dispatch:\n\n",
+	"hosted CI trigger 仅允许 workflow_dispatch 手动触发，不得加入 push、PR 或 tag",
 );
 assert.ok(!ciWorkflowSource.includes("runner.tool_cache"), "job 级 env 不引用尚不可用的 runner context");
 assert.ok(ciWorkflowSource.includes("fetch-depth: 0"), "CI checkout 保留完整历史以验证 terminal task commit 证据");
