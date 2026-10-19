@@ -6,7 +6,7 @@ id: T-178
 
 # T-178 错误提醒卡可确认清场 + 会话移除后的宿主记录对账清理
 
-状态: active
+状态: completed
 关联: R-01-002、R-01-027
 风险等级: standard
 
@@ -82,6 +82,22 @@ id: T-178
 | SOLUTION | 修改 | UNIT | update | 同次变化由本 task 记录 |
 | DOMAIN | 修改 | UNIT | none | 词条口径同步，不新增可执行断言（同次修改由本 task 记录） |
 
+## 自查清单
+
+- 边界：错误提醒游标的三种边界（ackedAt 为 null、等于 lastTurnEnd、晚于 lastTurnEnd）与 lastTurnEnd 缺字段（undefined 与 null 两种写法）都有断言；孤儿判定覆盖空 Set、null、undefined、空 id、重复 id、部分命中、全部仍在七类输入（`scripts/check.mjs::errorReminder`、`scripts/check.mjs::orphanRecordIds`）。
+- 异常路径：会话列表读取抛错、返回非数组、会话持久化未挂载、会话全集为空，四条路径都整体跳过且一条记录都不删；单条删除抛错只记 warn 并 return，不阻断其余记录（`scripts/check.mjs::reconcileOrphanRecords`、`scripts/check.mjs::dropSessionRecords`）。
+- 回归影响：完成提醒链路、已读未读、档位呈现、角标三处数量标识均未改动其判定代码；按钮显隐改动触及错误卡，故回归 `error-reminder`、`completion-sync`、`done-read-state`、`compact-density`、`badge-surfaces` 五个 spec 全 PASS。
+- 反向断言强度：错误卡不参与中间档收合的断言不锁字符串写法，改为把 medium 档 CSS 按选择器切开后逐条匹配 `data-wait="error"`；已用五种等价绕过写法（联合选择器无空格、花括号无空格、`.dap-await-head`、`.dap-foot`、单引号）验证均能被挡下。
+- 已核验无问题：中间档错误卡正文保留、按钮与正文同行可见；确认写回只推进 ackedAt 不清 lastTurnEndKind；归档集合不参与判定。
+
 ## 终态与证据
 
-（待实现完成后填写）
+- 实现: `src/core.mjs` —— `errorReminder` 改为消费 ackedAt 游标（先判原值 null/undefined 再 `Number()`，避免 `Number(null) === 0` 把缺字段当成纪元 0），新增导出纯函数 `orphanRecordIds(ids, live)`（`live` 非 Set 或为空集合时返回 `[]`，去重并跳过空 id）；`src/client.mjs` —— `confirm.hidden` 扩到 `done | error`，中间档收合 CSS 保持 `data-wait="done"` 单档作用域不动（错误正文是清场依据，不参与收合）；`src/host.mjs` —— 新增 `dropSessionRecords(id, reason)`（await domainReady 后删两表，按表分别 `broadcast`/`broadcastBusy`，失败只 warn）、`reconcileOrphanRecords(reason)`（持久化未就绪跳过 → `listSessions()` → 空集合跳过 → 经 `orphanRecordIds` 产出待删 id）、domain 打开后 `void reconcileOrphanRecords('startup')`、`ctx.on('session/disposed')` 实时删单条；`.dsh-plugin/client.js` 为重编译产物。
+- 测试: `node scripts/check.mjs` 全绿（all assertions passed）。新增断言：错误提醒 ack 游标四态与 null 兜底两条、两类卡共用按钮的显隐表达式、`orphanRecordIds` 九条行为级断言、对账四条源码断言（含持久化守卫与「判定先于读取」的顺序断言）、medium 档选择器级反向断言。E2E：`error-reminder`（按钮存在且可见 → 点击后离开活动区并落入最近历史区 → 宿主登记仍保留 `lastTurnEndKind === 'error'` → 刷新后仍在历史区）、`completion-sync`、`done-read-state`、`compact-density`、`badge-surfaces` 五个 spec 全 PASS（`e2e-final.log`）；全量 27 spec 中 `auto-update`、`background-jobs`、`card-content`、`loading-ready` 四个失败，已在 stash 掉本次改动的干净基线上重跑并同样失败，确认为既有环境问题，与本次改动无关。
+- SOLUTION 对照: 与 SOLUTION「等待三类呈现」中错误提醒卡提供同一枚按钮、「核心数据与不变量」中错误提醒成立改为共用 ack 游标、「窗格渲染器」中 `errorReminder` 派生口径、「完成确认宿主侧」新增的会话移除对账与确认写回两类卡共用、「需求追溯索引」新增 R-01-027 行一致；核对日期已改 2026-10-19。PRD R-01-002/AC-05、AC-10、AC-13 与新增 R-01-027 的每条 AC 均有实现与测试锚点。
+- commit: 7ac23d2 ✨ 改进(activity-pane): 错误提醒卡支持移入历史，会话移除后对账清理宿主记录
+- review: 审核方 = 独立 teammate `reviewer`（fresh 上下文，只读，未参与实现）；结论 = **non-blocking**；两轮。
+  - 首轮 blocking：① 高 —— `listSessions()` 在会话持久化未挂载时可能返回空数组，对账会把两表清空（`ackedAt` 不可恢复）；② 中 —— 错误卡在中间档被卷进收合作用域，与 SOLUTION 写的「阻塞/错误提醒卡不收合」相反。
+  - 修复：① 抽出 `orphanRecordIds` 单点（空集合/非 Set 一律不删）+ 宿主 `live.size === 0` 守卫 + 持久化就绪守卫；② 撤销 CSS 扩围，断言改为选择器级反向判定。
+  - 复审：四点修复逐项核验成立，无 blocking finding。
+  - 残余（non-blocking，已知并接受）：启动窗口内若持久化后端在 `sessionPersistence` 已可查但列表仍不完整，理论上仍可能误判（守卫只覆盖「未就绪」与「空集合」两种确定态）；`turn/end` 的 `acks.put` 与 `dropSessionRecords` 交错时可能重新写回一条孤儿记录，由下次启动对账收敛；错误卡在中间档的可读性只有 CSS 契约断言、无 e2e；错误卡确认后的跨客户端同帧解除未新增 e2e（`completion-sync` 只覆盖完成提醒）。
