@@ -24,10 +24,10 @@
 
 **本项目不挂任何自动门禁：不装 git hook、CI 不在 push 时跑、不因提交或推送被测试阻断。测试只在东家明确要求时执行。**
 
-- 东家没要求时，agent 改完即交付，不主动运行 `pnpm check`、`pnpm test:e2e`、`pnpm verify`、`pnpm lint`。
+- 东家没要求时，agent 改完即交付，不主动运行 `pnpm check`、`pnpm test:e2e`、`pnpm lint`。
 - 不跑测试不构成交付阻塞，也不需要为此道歉或加「未验证」免责声明；如实说明改了什么即可。
 - `.githooks/` 里的脚本保留作参考实现，但**不安装**（`core.hooksPath` 未指向它时不生效）。
-- 历史遗留的 `pnpm verify` / `pnpm verify:fast` 仍可执行，但不再有任何流程要求它们。
+- 聚合脚本 `pnpm verify` / `pnpm verify:fast` 已删除；需要完整验证时分步跑 `pnpm lint`、`pnpm check`、`pnpm test:e2e`。
 
 ## 构建与验证命令
 
@@ -35,10 +35,9 @@
 | --- | --- |
 | `pnpm build:client` | 由 `src/*.mjs` 重建 `.dsh-plugin/client.js`（原子写入） |
 | `pnpm check` / `pnpm test` | 同一命令：`node scripts/check.mjs` + `node scripts/host-reconcile.test.mjs`（按需） |
-| `pnpm verify:fast` | `pnpm lint` + `pnpm check`（按需，实测约 50 秒） |
-| `pnpm lint` | `lint:agentmap` + `lint:test-impact`（Python 3，按需） |
-| `pnpm test:e2e` | 全量浏览器 E2E（隔离 `$DSH_HOME` + mock LLM + 随机端口，按需） |
-| `pnpm verify` | `verify:fast` + `test:e2e`（按需，全量约 8–25 分钟） |
+| `pnpm lint` | `lint:agentmap` + `lint:test-impact`（Python 3，按需，实测约 40 秒） |
+| `pnpm test:e2e` | 全量浏览器 E2E（隔离 `$DSH_HOME` + mock LLM + 随机端口，按需，约 8–25 分钟） |
+| `pnpm test:e2e:known-good` | 只跑 5 个稳定 spec 的冒烟集合（按需） |
 | `pnpm dev:watch` | 监视 `src/*.mjs`，变化即重建 bundle（配合 dsh-client-hmr 热装） |
 | `pnpm accept:manual` | 打印人工验收清单（观感/真机类条目） |
 | `pnpm check:staged-client` | 校验 Git index 中源码与 staged bundle 字节一致 |

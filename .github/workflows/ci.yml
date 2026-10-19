@@ -61,7 +61,11 @@ jobs:
         run: pnpm exec playwright install --with-deps chromium-headless-shell
 
       - name: Verify
-        run: pnpm verify
+        # pnpm verify 已移除（C-104）：内联 lint + 单测 + 全量 E2E 三步
+        run: |
+          pnpm lint
+          pnpm check
+          pnpm test:e2e
 
       - name: Upload E2E failure screenshots
         if: failure()

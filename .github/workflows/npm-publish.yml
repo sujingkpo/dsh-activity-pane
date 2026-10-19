@@ -83,7 +83,10 @@ jobs:
 
       # Full E2E is the main-branch release prerequisite; this guards the exact tag tree.
       - name: Run release checks
-        run: pnpm verify:fast
+        # pnpm verify:fast 已移除（C-104）：内联 lint + 单测两步
+        run: |
+          pnpm lint
+          pnpm check
 
       - name: Ensure checks did not rewrite the release tree
         run: git diff --exit-code

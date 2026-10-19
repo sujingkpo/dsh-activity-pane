@@ -43,7 +43,8 @@ owner: agent 主笔，项目属主审批
 - 权威验证入口: 手动
 - 完整验证命令（需要时手工执行）: `pnpm check`（core 单测 + 宿主对账 + client bundle 契约），`pnpm test:e2e`（浏览器 E2E）。
 - `pnpm check` 会从工作树重建 `.dsh-plugin/client.js`；跑过后如需提交，把重建产物一并暂存即可（不跑也不会被门禁拦下）。
-- 东家没要求测试时，agent 只做改动与自述，不主动运行 `pnpm check`、`pnpm test:e2e`、`pnpm verify`，也不以「未跑测试」为由阻塞交付。
+- 东家没要求测试时，agent 只做改动与自述，不主动运行 `pnpm check`、`pnpm test:e2e`、`pnpm lint`，也不以「未跑测试」为由阻塞交付。
+- 聚合脚本 `pnpm verify` / `pnpm verify:fast` 已删除（C-104）；需要完整验证时分步跑 `pnpm lint`、`pnpm check`、`pnpm test:e2e`。
 - 需要跑 E2E 时的既定事实：
   - 本机可直接跑，启动器自动探测（优先 `E2E_DSH_BIN`/`E2E_DSH_CLI`，其次已安装的 `DSH NEXT`，最后 `DSH Desktop`）。
   - 本机浏览器缓存走 `PLAYWRIGHT_BROWSERS_PATH` 环境变量；项目内也已安装 chromium-headless-shell。
@@ -56,7 +57,7 @@ owner: agent 主笔，项目属主审批
   - `.githooks/pre-commit.d/35-staged-client-bundle.sh`：staged bundle 与源码字节一致。
   - `.githooks/pre-push.d/20-agentmap-lint.sh`：待推送历史的 AgentMap 不可变契约。
   - `.githooks/pre-push.d/25-test-impact.sh`：逐提交重放测试影响门禁。
-  - `.githooks/pre-push.d/30-dsh-activity-pane-e2e.sh`：完整 `pnpm verify`。
+  - `.githooks/pre-push.d/30-dsh-activity-pane-e2e.sh`：分步执行 `pnpm lint`、`pnpm check`、`pnpm test:e2e`。
 - CI 门禁: 不适用：`.github/workflows/ci.yml` 仅保留 `workflow_dispatch` 手动触发，不再在 push 时自动运行；main 分支推送不再触发任何自动验证。
 - GitHub Release 仍手工创建。
 - npm 发布: `.github/workflows/npm-publish.yml` 仅由手工创建的 Release `published` 事件触发，与日常提交无关。
