@@ -20,9 +20,9 @@
 // { busyMs, openTurnStart, watermarkSeq }）——domain 无迁移机制（version 不同在 open 时
 // 拒绝），新增表必须落在新 domain，不动既有 acks domain。
 // 设计约束（C-030）：不写会话日志、不依赖 sessionProjections、不引入客户端轮询；
-// 完成提醒成立 = 主会话 && 非 running && 无阻塞等待 && 非委托周期 && lastTurnEnd > ackedAt，
-// 错误提醒成立 = 主会话 && 非 running && 无阻塞等待 && 非委托周期 && lastTurnEndKind === 'error'
-// （不消费 ack 游标，C-043），判定在客户端纯函数完成，本侧只维护持久事实与广播。
+// 完成提醒成立 = 主会话 && 非 running && 无阻塞等待 && 非委托周期 && lastTurnEnd > ackedAt；
+// 错误提醒成立 = 同样的前置条件 && lastTurnEndKind === 'error' && 该回合尚未被确认（与完成提醒
+// 共用同一 ack 游标，C-102）。判定在客户端纯函数完成，本侧只维护持久事实与广播。
 
 import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
 // 配置 schema 用 schemastery（与宿主 dsh-settings 的表单投影同一套 schema 语义：
@@ -30,7 +30,7 @@ import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
 // schema 仍是 zod——两者用途不同，故分别引入，不复用同一个 z 名字。
 import schemastery from '@deepseek-ai/schemastery'
 import { z } from 'zod'
-import { applyTurnEventToStats, createSessionEventSerializer, isBusyBoundaryEvent, orphanRecordIds, reconcileTurnStats, turnStatsEqual, turnStatsFrom, truncateErrorNote } from './core.mjs'
+import { applyTurnEventToStats, createSessionEventSerializer, isBusyBoundaryEvent, reconcileOrphans, reconcileTurnStats, turnStatsEqual, turnStatsFrom, truncateErrorNote } from './core.mjs'
 
 export const name = 'dsh-activity-pane'
 export const inject = ['storageDomain', 'webServer', 'sessionQuery', 'connection']
@@ -203,9 +203,12 @@ export function apply(ctx) {
 			if (!forceFresh) return inflight
 			return inflight.then(() => ensureTurnStatsFresh(id, { closeOpenTurn, forceFresh: true }))
 		}
+		// 注意 cordis 的 ctx.inject(deps, cb) 语义：cb 的首个实参是**子 Context**，服务挂在它的
+		// 同名属性上；把实参当服务对象会抛 cannot get property ... without inject（生产日志曾长期
+		// 刷这条告警，见 T-178 审核记录）。
 		const promise = new Promise((resolve) => {
-			ctx.inject(['sessionQuery'], (sessionQuery) => {
-				resolve(sessionQuery)
+			ctx.inject(['sessionQuery'], (childCtx) => {
+				resolve(childCtx.sessionQuery)
 			})
 		}).then(async (sessionQuery) => {
 			try {
@@ -252,15 +255,19 @@ export function apply(ctx) {
 		if (removedTurn) broadcastBusy()
 	}
 
-	/** 孤儿对账（R-01-027/AC-03，C-103）：以 ctx.sessionQuery.listSessions() 的返回集合为
-	 *  唯一权威判据，删掉两表中不属于该集合的记录。判据与「该不该判」的规则收敛在 core 的
-	 *  `orphanRecordIds`（空集合/非 Set 一律不删）。这里两次保险：
+	/** 孤儿对账（R-01-027/AC-02、AC-03，C-103）：以会话服务列表为**唯一**权威判据，删掉两表中
+	 *  不属于该集合的记录。启动全量对账与 `session/disposed` 的实时复核共用本函数——后者不是
+	 *  「删除信号」，只是「值得复核一次」的提示（disposed = live store 移除，日志仍在磁盘的会话
+	 *  依旧会被列出），所以也走同一判据。
+	 *  「该不该判」的规则收敛在 core 的 `orphanRecordIds`（空集合/非 Set 一律不删）。这里两次保险：
 	 *    1. 列表读取失败或非数组 → 整体跳过（此时任何判断都可能是错的）；
 	 *    2. 读到的集合为空 → 视为「会话全集尚不可信」跳过并记 warn。持久化后端是可选注入，
 	 *       启动瞬间可能还没挂载，此时 listSessions 只并入内存会话，而内存里同样没有会话，
 	 *       照删会把两张表清空（ackedAt 不可恢复）。宁可留下孤儿，等下次启动再收敛。
-	 *  归档集合不参与判断：归档的会话仍在会话服务列表里，只由客户端显示过滤，记录必须保留。 */
-	async function reconcileOrphanRecords(reason) {
+	 *  归档集合不参与判断：归档的会话仍在会话服务列表里，只由客户端显示过滤，记录必须保留。
+	 *  @param {string} reason 触发来源（startup / disposed），只用于日志
+	 *  @param {string[]|null} onlyIds 非空时只复核这些 id（实时路径），空/缺省即全量对账（启动路径） */
+	async function reconcileOrphanRecords(reason, onlyIds = null) {
 		try {
 			await domainReady
 			// 持久化面未就绪时不做判断（C-103）：sessionQuery 的持久化后端是可选注入，
@@ -277,30 +284,30 @@ export function apply(ctx) {
 				ctx.logger?.warn?.(`dsh-activity-pane: 会话持久化未就绪，跳过孤儿对账（${reason}）`)
 				return
 			}
-			ctx.inject(['sessionQuery'], (sessionQuery) => {
-				void (async () => {
-					try {
-						const records = await sessionQuery.listSessions()
-						if (!Array.isArray(records)) return
-						const live = new Set(
-							records.map((record) => String(record?.header?.id ?? '')).filter((id) => id !== ''),
-						)
-						if (live.size === 0) {
-							ctx.logger?.warn?.(`dsh-activity-pane: 会话全集为空，跳过孤儿对账（${reason}）`)
-							return
-						}
-						// 先取 id 列表再逐条删：遍历中删除同一张表会让迭代器行为依赖实现细节。
-						const ackIds = [...acks.entries()].map(([id]) => String(id))
-						const turnIds = [...turnStats.entries()].map(([id]) => String(id))
-						for (const id of orphanRecordIds(ackIds, live)) await dropSessionRecords(id, reason)
-						for (const id of orphanRecordIds(turnIds, live)) await dropSessionRecords(id, reason)
-					} catch (error) {
-						ctx.logger?.warn?.(`dsh-activity-pane: 孤儿对账失败（${reason}）: ${String(error)}`)
-					}
-				})()
+			// 同步段先取两张表的 id 快照，再 await 会话列表：反过来的话，await 期间新写入的
+			// 记录会出现在快照里却不在列表里，被误判成孤儿（T-178 审核 P3）。
+			const only = Array.isArray(onlyIds) && onlyIds.length > 0 ? new Set(onlyIds.map((id) => String(id))) : null
+			const ackIds = [...acks.entries()].map(([id]) => String(id)).filter((id) => only === null || only.has(id))
+			const turnIds = [...turnStats.entries()].map(([id]) => String(id)).filter((id) => only === null || only.has(id))
+			if (ackIds.length === 0 && turnIds.length === 0) return
+			// cordis 的 ctx.inject(deps, cb) 语义：cb 的首个实参是**子 Context**，服务挂在它的同名
+			// 属性上。把实参当服务对象会抛 cannot get property ... without inject（本文件历史上
+			// busy 懒回填就是这样长期静默失败的，见 T-178 审核记录）。
+			const sessionQuery = await new Promise((resolve) => {
+				ctx.inject(['sessionQuery'], (childCtx) => {
+					resolve(childCtx.sessionQuery)
+				})
 			})
+			// 判断本身交给 core 的 reconcileOrphans（可被单测真正执行到）：它负责读取会话全集、
+			// 判定孤儿，并给出「为什么跳过」；这里只负责把决定执行成删除与广播。
+			const decision = await reconcileOrphans(ackIds, turnIds, () => sessionQuery.listSessions())
+			if (decision.skipped !== null) {
+				ctx.logger?.warn?.(`dsh-activity-pane: 跳过孤儿对账（${reason}）：${decision.skipped}`)
+				return
+			}
+			for (const id of decision.deleteIds) await dropSessionRecords(id, reason)
 		} catch (error) {
-			ctx.logger?.warn?.(`dsh-activity-pane: 孤儿对账无法启动（${reason}）: ${String(error)}`)
+			ctx.logger?.warn?.(`dsh-activity-pane: 孤儿对账失败（${reason}）: ${String(error)}`)
 		}
 	}
 
@@ -417,14 +424,15 @@ export function apply(ctx) {
 		})
 	})
 
-	// 会话移除的实时清理（R-01-027/AC-02，C-103）：宿主在 session/disposed 时已同步发出
-	// `api-session/removed`（客户端据此把该行从列表快照移除，卡片随之从三区消失）；宿主侧
-	// 在同一个事件上删掉两张表里属于它的记录，避免记录随删除次数无限堆积。只删这一个 id，
-	// 不做全量扫描——扫描由启动对账承担。
+	// 会话移除的实时清理（R-01-027/AC-02，C-103）：`session/disposed` 是**live Session store 移除**，
+	// 不等于「不再被会话服务列出」——listSessions = persisted ∪ live，一个已 disposed 但日志仍在
+	// 磁盘的主会话仍会被列出（T-178 审核 P1）。因此这里不能直接删，必须复用与启动对账相同的
+	// 权威判据：事件到了之后对该 id 做一次列表复核，确实不在列表里才删；acl 复核失败/集合不可信
+	// 时一律不删，留待下次启动对账收敛。复核是 fire-and-forget（不阻塞事件派发的其它订阅者）。
 	ctx.on('session/disposed', (session) => {
 		const id = String(session?.id ?? '')
 		if (id === '') return
-		void dropSessionRecords(id, 'disposed')
+		void reconcileOrphanRecords('disposed', [id])
 	})
 
 	// HTTP API（前缀挂载，handler 内按子路径分发）。
@@ -475,11 +483,19 @@ export function apply(ctx) {
 					try {
 						await domainReady
 						const current = acks.get(sessionId)
+						// 记录已不存在（会话刚被清理，或在飞行的 ack 晚于清理到达，R-01-027/AC-02）：
+						// 此时写回只会造出一条没有回合事实的空壳记录（lastTurnEnd 为 null 的记录会被
+						// 客户端整条丢弃，却永久占着存储）。按幂等成功返回、不写。
+						if (current === undefined || current === null) {
+							res.writeHead(200, { 'Content-Type': 'application/json' })
+							res.end(JSON.stringify({ ok: true, skipped: 'no-record' }))
+							return
+						}
 						// 确认写回只动 ackedAt：保留回合结束时刻、结束原因与错误信息（C-043）。
 						await acks.put(sessionId, {
-							lastTurnEnd: current?.lastTurnEnd ?? null,
-							lastTurnEndKind: current?.lastTurnEndKind ?? null,
-							lastTurnEndError: current?.lastTurnEndError ?? null,
+							lastTurnEnd: current.lastTurnEnd ?? null,
+							lastTurnEndKind: current.lastTurnEndKind ?? null,
+							lastTurnEndError: current.lastTurnEndError ?? null,
 							ackedAt: Date.now(),
 						})
 						broadcast()

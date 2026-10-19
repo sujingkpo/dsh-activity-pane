@@ -2161,6 +2161,39 @@ export function orphanRecordIds(ids, live) {
 	return out
 }
 
+/** 孤儿清理决策（R-01-027/AC-02、AC-03，C-103）：把「该不该删」的判断从宿主 IO 里分离出来，
+ *  使拒绝路径能被执行级测试真正触达（源码正则断不了一条永远抛错的路径——T-178 审核的 B-1
+ *  就是这样漏过去的）。`listSessions` 由调用方注入，本函数只判断、不删除。
+ *  拒绝语义（宁可留下孤儿，也不误删有效记录）：
+ *    - `no-query`：没拿到会话查询能力；
+ *    - `list-failed`：读取抛错或返回非数组；
+ *    - `empty-corpus`：会话全集为空（持久化后端未挂载时就可能是这种形态）。
+ *  三种拒绝都返回空 deleteIds，调用方据此跳过本轮。
+ *  @param {Iterable<string>|null|undefined} ackIds 提醒登记表的记录 id
+ *  @param {Iterable<string>|null|undefined} turnIds 累计运行时长记账表的记录 id
+ *  @param {(() => Promise<unknown>)|null|undefined} listSessions 会话全集读取函数
+ *  @returns {Promise<{ deleteIds: string[], skipped: 'no-query'|'list-failed'|'empty-corpus'|null }>} */
+export async function reconcileOrphans(ackIds, turnIds, listSessions) {
+	if (typeof listSessions !== 'function') return { deleteIds: [], skipped: 'no-query' }
+	let records
+	try {
+		records = await listSessions()
+	} catch {
+		return { deleteIds: [], skipped: 'list-failed' }
+	}
+	if (!Array.isArray(records)) return { deleteIds: [], skipped: 'list-failed' }
+	const live = new Set(records.map((record) => String(record?.header?.id ?? '')).filter((id) => id !== ''))
+	if (live.size === 0) return { deleteIds: [], skipped: 'empty-corpus' }
+	// 两张表可能含同一个 id：合并后去重（删除本身幂等，但不必对同一 id 走两轮落盘）。
+	const out = []
+	const seen = new Set()
+	for (const id of [...orphanRecordIds(ackIds, live), ...orphanRecordIds(turnIds, live)]) {
+		if (seen.has(id)) continue
+		seen.add(id)
+		out.push(id)
+	}
+	return { deleteIds: out, skipped: null }
+}
 /** 错误提醒正文（R-01-002/AC-09、AC-13，C-043）：宿主登记的 lastTurnEndError（截断后
  *  的错误信息）或回落固定文案；不冒充具体错误。调用方（buildEntries 的 errWait 判定）
  *  已保证错误提醒成立，本函数只做文本取舍。 */

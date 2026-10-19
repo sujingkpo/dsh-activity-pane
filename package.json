@@ -33,8 +33,8 @@
   },
   "scripts": {
     "build:client": "node scripts/build-client.mjs",
-    "check": "node scripts/check.mjs",
-    "test": "node scripts/check.mjs",
+    "check": "node scripts/check.mjs && node scripts/host-reconcile.test.mjs",
+    "test": "node scripts/check.mjs && node scripts/host-reconcile.test.mjs",
     "test:e2e": "node e2e/run.mjs",
     "dev:watch": "node scripts/watch.mjs",
     "accept:manual": "node scripts/acceptance.mjs",

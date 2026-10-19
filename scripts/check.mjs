@@ -48,6 +48,7 @@ import {
 	completionReminder,
 	errorReminder,
 	orphanRecordIds,
+	reconcileOrphans,
 	ERROR_NOTE_MAX,
 	ERROR_NOTE_FALLBACK,
 	truncateErrorNote,
@@ -5232,6 +5233,7 @@ assert.ok(
 
 // R-01-002/AC-12 刷新/重连恢复：状态由宿主侧持久化承载，不依赖客户端在线观测。
 const hostSource = await readFile(join(root, "src/host.mjs"), "utf8");
+const coreSource = await readFile(join(root, "src/core.mjs"), "utf8");
 const hostEntry = await readFile(join(root, ".dsh-plugin/index.mjs"), "utf8");
 execFileSync(process.execPath, ["--check", join(root, "src/host.mjs")], { stdio: "pipe" });
 execFileSync(process.execPath, ["--check", join(root, ".dsh-plugin/index.mjs")], { stdio: "pipe" });
@@ -5259,21 +5261,31 @@ assert.ok(
 	"domain 打开后触发一次启动对账（R-01-027/AC-03）",
 );
 assert.ok(
-	/async function reconcileOrphanRecords\(reason\)[\s\S]{0,1200}await sessionQuery\.listSessions\(\)/.test(hostSource),
+	/async function reconcileOrphanRecords\(reason, onlyIds = null\)[\s\S]{0,2400}reconcileOrphans\(ackIds, turnIds, \(\) => sessionQuery\.listSessions\(\)\)/.test(hostSource),
 	"对账以会话服务全集为唯一权威判据，不用归档集合或本地缓存（R-01-027/AC-03、AC-04）",
 );
 assert.ok(
-	!/async function reconcileOrphanRecords\(reason\)[\s\S]{0,1600}archivedSessionIds/.test(hostSource),
+	!/async function reconcileOrphanRecords\(reason, onlyIds = null\)[\s\S]{0,2400}archivedSessionIds/.test(hostSource),
 	"对账不读归档集合：归档不是移除，记录必须保留（R-01-027/AC-04）",
 );
 assert.ok(
-	/async function reconcileOrphanRecords\(reason\)[\s\S]{0,1600}catch \(error\)/.test(hostSource),
-	"列表读取失败时对账整体跳过并记 warn，宁可留下孤儿也不误删有效记录（R-01-027/AC-03）",
+	/async function reconcileOrphanRecords\(reason, onlyIds = null\)[\s\S]{0,2600}catch \(error\)/.test(hostSource),
+	"对账整体失败时只记 warn，不向上抛（R-01-027/AC-03）",
+);
+assert.ok(
+	/decision\.skipped !== null[\s\S]{0,200}return/.test(hostSource),
+	"判定为跳过时不执行任何删除，宁可留下孤儿也不误删有效记录（R-01-027/AC-03）",
 );
 // 实时清理（AC-02）：会话移除的实时信号上只删该 id 的记录，删除后经既有 SSE 收敛。
+// 实时路径必须以会话服务列表为判据复核，不能见 disposed 就删：disposed 是 live store 移除，
+// 日志仍在磁盘的会话依旧会被 listSessions 列出（T-178 审核 P1）。
 assert.ok(
-	/ctx\.on\('session\/disposed',\s*\(session\)\s*=>\s*\{[\s\S]{0,300}dropSessionRecords\(id, 'disposed'\)/.test(hostSource),
-	"会话移除时实时删除两张表中属于它的记录（R-01-027/AC-02）",
+	/ctx\.on\('session\/disposed',\s*\(session\)\s*=>\s*\{[\s\S]{0,400}reconcileOrphanRecords\('disposed', \[id\]\)/.test(hostSource),
+	"会话移除时实时复核该会话：确实不在会话服务列表里才删记录（R-01-027/AC-02）",
+);
+assert.ok(
+	!/ctx\.on\('session\/disposed'[\s\S]{0,400}dropSessionRecords\(id, 'disposed'\)/.test(hostSource),
+	"实时路径不得绕过会话服务列表直接删：disposed 不等于「不再被列出」（R-01-027/AC-02）",
 );
 assert.ok(
 	/async function dropSessionRecords\(id, reason\)[\s\S]{0,700}acks\.delete\(id\)[\s\S]{0,200}turnStats\.delete\(id\)/.test(hostSource),
@@ -5298,14 +5310,47 @@ assert.deepEqual(orphanRecordIds(["a", "a", "b"], new Set(["a"])), ["b"], "重�
 assert.deepEqual(orphanRecordIds(["", "a"], new Set(["a"])), [], "空 id 不参与判定");
 assert.deepEqual(orphanRecordIds(null, new Set(["a"])), [], "记录集合不可得时不删任何记录");
 assert.deepEqual(orphanRecordIds(new Set(["a", "b"]), new Set(["a", "b"])), [], "全部会话仍在时清空动作不发生");
-// 对账必须经该单点判定，且不得在判定之前自行删除（防止绕开空集合保护）。
-assert.ok(
-	/orphanRecordIds\(ackIds, live\)/.test(hostSource) && /orphanRecordIds\(turnIds, live\)/.test(hostSource),
-	"两张表的删除都经孤儿判定单点产出（R-01-027/AC-03）",
+// 执行级断言（R-01-027/AC-03）：真正跑一遍判断链路，覆盖补丁前「函数一跑就抛错」的漏判（B-1）。
+const liveList = async () => [{ header: { id: "a" } }, { header: { id: "b" } }];
+assert.deepEqual(
+	await reconcileOrphans(["a", "gone"], ["b", "gone2"], liveList),
+	{ deleteIds: ["gone", "gone2"], skipped: null },
+	"两张表的孤儿被合并去重后交给调用方删除（R-01-027/AC-03）",
 );
+assert.deepEqual(
+	await reconcileOrphans(["a"], ["b"], liveList),
+	{ deleteIds: [], skipped: null },
+	"全部会话仍在时不删除任何记录（R-01-027/AC-04）",
+);
+assert.deepEqual(
+	await reconcileOrphans(["x"], ["x"], liveList),
+	{ deleteIds: ["x"], skipped: null },
+	"同一 id 在两张表都缺席时只产出一次（避免同一条走两轮删除落盘）",
+);
+assert.deepEqual(
+	await reconcileOrphans(["x"], [], async () => []),
+	{ deleteIds: [], skipped: "empty-corpus" },
+	"会话全集为空时拒绝判断——这正是持久化后端未挂载时的形态（R-01-027/AC-03）",
+);
+assert.deepEqual(
+	await reconcileOrphans(["x"], [], async () => { throw new Error("boom"); }),
+	{ deleteIds: [], skipped: "list-failed" },
+	"列表读取抛错时不删除任何记录（R-01-027/AC-03）",
+);
+assert.deepEqual(
+	await reconcileOrphans(["x"], [], async () => null),
+	{ deleteIds: [], skipped: "list-failed" },
+	"列表返回非数组时不删除任何记录（R-01-027/AC-03）",
+);
+assert.deepEqual(
+	await reconcileOrphans(["x"], [], null),
+	{ deleteIds: [], skipped: "no-query" },
+	"拿不到会话查询能力时不删除任何记录（R-01-027/AC-03）",
+);
+// 判定必须经单点产出：两张表的 id 都要过 orphanRecordIds，再合并。
 assert.ok(
-	/live\.size === 0\)[\s\S]{0,200}return/.test(hostSource),
-	"会话全集为空时对账整体跳过并记 warn——宁可留下孤儿也不清空有效记录（R-01-027/AC-03）",
+	/orphanRecordIds\(ackIds, live\)/.test(coreSource) && /orphanRecordIds\(turnIds, live\)/.test(coreSource),
+	"两张表的删除都经孤儿判定单点产出（R-01-027/AC-03）",
 );
 // 持久化面未就绪时同样跳过：只用一个「刚恢复的内存会话」当全集，会把其余会话的记录全判成孤儿。
 assert.ok(
@@ -5313,14 +5358,19 @@ assert.ok(
 	"会话持久化未挂载时对账整体跳过——防止以不完整的会话全集误删记录（R-01-027/AC-03）",
 );
 assert.ok(
-	hostSource.indexOf("sessionPersistence") < hostSource.indexOf("await sessionQuery.listSessions()"),
+	hostSource.indexOf("sessionPersistence") < hostSource.indexOf("reconcileOrphans(ackIds, turnIds"),
 	"持久化就绪判断发生在会话全集读取之前（顺序即防线，R-01-027/AC-03）",
 );
 // 确认写回保留持久事实（C-102）：只推进 ackedAt，不清 lastTurnEndKind / lastTurnEndError。
 assert.ok(
 	/ackedAt: Date\.now\(\)/.test(hostSource) &&
-		/lastTurnEndKind: current\?\.lastTurnEndKind \?\? null/.test(hostSource),
+		/lastTurnEndKind: current\.lastTurnEndKind \?\? null/.test(hostSource),
 	"确认写回只推进 ackedAt、保留回合结束原因（C-102：错误提醒确认后仍可判定该回合以错误结束）",
+);
+// 记录已被清理时不得复活空壳记录（T-178 审核 P2）：写回前先判记录存在，缺失即幂等返回。
+assert.ok(
+	/current === undefined \|\| current === null[\s\S]{0,300}skipped: 'no-record'/.test(hostSource),
+	"确认写回在记录已被清理时幂等返回、不写空壳记录（R-01-027/AC-02）",
 );
 // 会话移除后三区都不显示：buildEntries 与 buildRecent 都只遍历会话服务快照的 ids。
 assert.deepEqual(
