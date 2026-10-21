@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager
 from fnmatch import fnmatchcase
+from typing import IO
 import hashlib
 import os
 import re
@@ -31,6 +32,45 @@ def _utf8_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess:
 
 subprocess.run = _utf8_run  # type: ignore[assignment]
 
+
+class GitCommandError(RuntimeError):
+    """git failed in a way that is not data semantics; the gate must fail closed."""
+
+
+def run_git(root: Path, args: list[str], *, expected: tuple[int, ...] = (0,)) -> str:
+    """Run git and return stdout, treating unexpected exit codes as repository errors.
+
+    Codes listed in `expected` are data semantics (1 from merge-base
+    --is-ancestor means "not an ancestor", 1 from git grep means "no
+    matches"); every other code means the repository is broken, locked, or
+    unreadable, which must abort loudly instead of degrading the audit into
+    a silent pass (fail-open). Callers that must keep scanning record the
+    GitCommandError on the Result themselves; the rest let it reach main().
+    """
+    try:
+        completed = subprocess.run(
+            ["git", *args], cwd=root, capture_output=True, text=True, check=False
+        )
+    except OSError as error:
+        raise GitCommandError(f"git unavailable: {error}") from error
+    if completed.returncode not in expected:
+        detail = completed.stderr.strip() or completed.stdout.strip()
+        raise GitCommandError(
+            f"git {' '.join(args)} exited {completed.returncode}"
+            + (f": {detail}" if detail else "")
+        )
+    return completed.stdout
+
+
+def git_data_error(result: Result, label: str, error: GitCommandError) -> None:
+    """Record a git infrastructure failure as a lint error (fail closed).
+
+    Used by checks that would otherwise continue with an empty result set;
+    the recorded error still fails the run, so the degraded scan cannot
+    turn into a silent pass.
+    """
+    result.errors.append(f"{label}: {error}; fix the repository state, then rerun")
+
 SYSTEM_FILES = {
     "PRD.md": ("prd", "living", "R"),
     "SOLUTION.md": ("solution", "living", None),
@@ -46,14 +86,44 @@ LEGACY_MAP_FILES = {
     "RATIONALE.md": ("DECISIONS.md", "decisions"),
 }
 APPEND_ONLY_FILES = ("RATIONALE.md", "DECISIONS.md")
+# v3 directory form: one frozen file per decision; a .gitkeep keeps the
+# directory non-empty for git. The single-file forms stay readable so the
+# migration commit itself stays auditable (parent v2 -> child v3) and an
+# interrupted migration never dead-ends the gate.
+RATIONALE_DIR = "RATIONALE"
+DECISION_STORE_NON_ENTRIES = frozenset({"index.md", ".gitkeep"})
+DECISION_CID_PATTERN = r"C-\d{3}[A-Z]?"
+DECISION_ENTRY_FILE_RE = re.compile(rf"^({DECISION_CID_PATTERN})-\S.+\.md$")
+# Optional machine-readable supersession declared by the revising entry.
+# One line per frontmatter; values may list several ids (a consolidation
+# decision can replace more than one predecessor).
+SUPERSEDES_LINE_RE = re.compile(r"^\s*supersedes:\s*(\S.*)$", re.MULTILINE)
+# A succession chain of this many replacement events triggers a doctor-style
+# revision-churn warning (the count of supersession edges, not entries).
+SUPERSESSION_CHAIN_WARN = 3
+# receipts/: optional write-once run records for tasks whose acceptance is a
+# real run (training, deployment) instead of in-repo tests. The genre only
+# exists where a repo creates receipts/, so absence is legal everywhere and
+# every check below no-ops without the directory. Receipts stay out of the
+# core-document budget and the style scan on purpose: they are evidence
+# records, not living prose a session must re-read.
+RECEIPTS_DIR = "receipts"
+RECEIPT_FILE_RE = re.compile(r"^(T-\d{3})-\S.+\.md$")
+RECEIPT_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+# A completed task that declared empirical acceptance must cite its run
+# receipt; the declaration is made when the task is created, the citation
+# when it closes.
+RECEIPT_DECLARE_RE = re.compile(r"^实证验收:\s*是\s*$", re.MULTILINE)
 LEGACY_DETAIL_TITLES = ("方案细化清单", "设计细化清单")
 LEGACY_READINESS_NAMES = {"重大设计选择已收敛": "重大方案选择已收敛"}
 # Commit hashes mix digits and hex letters a-f. Requiring at least one of
 # each rejects the prose tokens \b[0-9a-f]{7,40} swallowed: pure-letter
 # English words (defaced) and pure-digit numbers (20260801). Explicit
 # evidence lines (- commit:) stay in the lenient form and are verified
-# against git history, so no recall is lost where it matters.
-HEXISH_TOKEN = r"\b(?=[0-9a-f]*[0-9])(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b"
+# against git history, so no recall is lost where it matters. The lookarounds
+# replace \b because Python \b is CJK-blind ("提交abcdef1于仓库" has no
+# boundary around the hash when CJK touches it).
+HEXISH_TOKEN = r"(?<![0-9A-Za-z])(?=[0-9a-f]*[0-9])(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}(?![0-9A-Za-z])"
 IMPLEMENTATION_EVIDENCE_RE = re.compile(
     rf"(?:\b(?:src|tests?|tasks)/|{HEXISH_TOKEN}|`[^`]+\.(?:py|rs|go|js|ts|java|kt|rb|sh)`)",
     re.IGNORECASE,
@@ -69,7 +139,13 @@ DECISION_EVIDENCE_RE = re.compile(
 MUTATIONS = {"living", "append-only", "inbox", "lifecycle"}
 TERMINAL_STATES = {"completed", "abandoned", "superseded"}
 COMMIT_EVIDENCE_LINE_RE = re.compile(r"-\s*commit:\s*(?P<hash>[0-9a-f]{7,40})\s*")
-TASK_NAME_RE = re.compile(r"^(T-\d{3})-\d{8}-.+\.md$")
+# Canonical task names are dateless: T-nnn-slug.md. T-ID order already encodes
+# creation order and Git history is the time authority, so a filename date is
+# redundant metadata that only invites fabricated dates. Dated names
+# (T-nnn-YYYYMMDD-slug.md) stay valid for already tracked tasks (grandfathered);
+# only new tasks must be dateless.
+TASK_NAME_RE = re.compile(r"^(T-\d{3})-.+\.md$")
+DATED_TASK_NAME_RE = re.compile(r"^T-\d{3}-\d{8}-.+\.md$")
 LEGACY_TASK_NAME_RE = re.compile(r"^\d{8}-.+\.md$")
 # Optional CONVENTIONS local parameter: once the registered date has passed,
 # legacy task names and legacy map file names stop being grandfathered and
@@ -89,7 +165,7 @@ NON_GOAL_RE = re.compile(r"\*\*(NG-\d+)(?![0-9A-Za-z])")
 R_HEADING_RE = re.compile(r"^####\s+(R-\d{2}-\d{3})(?![0-9A-Za-z]).*$", re.MULTILINE)
 LEGACY_R_HEADING_RE = re.compile(r"^####\s+(R-\d{3})(?![0-9A-Za-z]).*$", re.MULTILINE)
 LEGACY_R_ID_RE = re.compile(r"(?<![0-9A-Za-z])R-\d{3}(?![0-9A-Za-z])")
-C_HEADING_RE = re.compile(r"^###\s+(C-\d{3}[A-Z]?)(?![0-9A-Za-z])", re.MULTILINE)
+C_HEADING_RE = re.compile(r"^#{1,3}\s+(C-\d{3}[A-Z]?)(?![0-9A-Za-z])", re.MULTILINE)
 R_ID_RE = re.compile(r"(?<![0-9A-Za-z])R-\d{2}-\d{3}(?![0-9A-Za-z])")
 AC_ID_RE = re.compile(r"(?<![0-9A-Za-z])R-\d{2}-\d{3}/AC-\d{2}(?![0-9A-Za-z])")
 C_ID_RE = re.compile(r"(?<![0-9A-Za-z])C-\d{3}[A-Z]?(?![0-9A-Za-z])")
@@ -224,27 +300,40 @@ IGNORED_PARTS = {
     "build",
     "tmp",
 }
-# AGENTS.md 不在锁定范围内：它是本项目的活文档，需要随项目演进（分支/命令/约定变化）
-# 时被改写；把它钉死成 canonical 会让任何一次正常文档维护都变成 lint 硬失败。
 CANONICAL_FILES_SHA256 = {
+    "AGENTS.md": "76159d1ac615e319c851079960568e036c5e09ce00b45c1ff9cfb2a916b814a8",
     ".githooks/commit-msg": "8fdca988a521f36cd012041217e14ab9d1847de5bd12ab81f2d2904c645b89e0",
     ".githooks/pre-commit": "83cfb74e7792ed1cf1264105941249d06a37872455faf83297220eb4268325fa",
-    ".githooks/pre-push": "c85da06d5f5423959656195835bb570912839e9e65483d3cc20bf096aea9cd4c",
+    ".githooks/pre-push": "d56ca3ca801088cc4d58f11d53d33a646710389bcb7937eff091c3d2ea7b0e99",
     ".githooks/pre-commit.d/20-agentmap-lint.sh": "95c7df8021cceb8b357c7ea4edafbb2559ddd4179527327f5197ae851d9aa9c4",
     ".githooks/pre-push.d/20-agentmap-lint.sh": "8151ed2cccbb2077f5fafc0a784269fa89815e1a173845c0de90b8563fee6f7d",
-    "tools/agentmap_validate_commit_msg.py": "3fa7abf08602abfa479eb4d8e196bc9d37342421c55535d69b04b6527b522eeb",
+    "tools/agentmap_validate_commit_msg.py": "b3672d4c2d4f0aa3bf623742d88e3aba0847ddb84804d3c96f0874840754f477",
 }
-# 验证门禁允许「全手动」：声明成这些值即表示不挂任何自动门禁。
-MANUAL_GATE_VALUES = {"手动", "manual", "无", "none"}
 HOOK_NAME_PATTERN = re.compile(r"^(?P<order>[0-9]{2})-[a-z0-9][a-z0-9-]*\.sh$")
-PLACEHOLDER_RE = re.compile(r"\b(?:TBD|TODO|N/A)\b|待评估|待定|待补", re.IGNORECASE)
+# Same CJK calibration as the id regexes below: \b is blind when CJK touches
+# the ASCII token ("评估TODO项" would evade \bTODO\b), so the lookaround set
+# is [0-9A-Za-z], not \b.
+PLACEHOLDER_RE = re.compile(r"(?<![0-9A-Za-z])(?:TBD|TODO|N/A)(?![0-9A-Za-z])|待评估|待定|待补", re.IGNORECASE)
 CORE_BUDGET_FILES = ("PRD.md", "SOLUTION.md", "DOMAIN.md", "CONVENTIONS.md", "AGENTS.md")
-# Token counts are not reproducible; the registered token budget converts
-# through a deterministic 3 bytes/token proxy (CJK UTF-8 averages 3 bytes
-# per character, roughly one token per character).
+# A3/A4 scan only project-authored living documents: AGENTS.md is canonical and
+# pinned by the sha256 contract, so its sample IDs cannot drift and need no decay signal.
+DOCTOR_LIVING_DOCS = tuple(name for name in CORE_BUDGET_FILES if name != "AGENTS.md")
+# Token counts are not reproducible; the legacy token budget converts through
+# a deterministic 3 bytes/token proxy (CJK UTF-8 averages 3 bytes per
+# character, roughly one token per character; English runs ~4 bytes per
+# token, so the proxy errs toward tighter budgets, the harmless direction).
+# The byte form is canonical because bytes are observable in plain files.
 CORE_BUDGET_BYTES_PER_TOKEN = 3
-CORE_BUDGET_RE = re.compile(r"^- 核心文档上限:\s*(\d+)\s*token\s*$", re.MULTILINE)
+CORE_BUDGET_RE = re.compile(
+    r"^- 核心文档上限:\s*(\d+)\s*(字节|token)\s*$", re.MULTILINE
+)
 CORE_SPLIT_PLAN_RE = re.compile(r"^- 核心文档分片方案:\s*\S", re.MULTILINE)
+# Optional deadline inside the registration line: "…;截止: YYYY-MM-DD" (also
+# accepts the full-width colon). Once the date passes, the escape hatch stops
+# covering the overage and the budget violation becomes an error again — the
+# 2026-11 registry survey found a repo sitting 3.2× over budget behind an
+# open-ended "待定" registration, which turns the hatch into a permanent waiver.
+CORE_SPLIT_DEADLINE_RE = re.compile(r"截止[:：]\s*(\d{4}-\d{2}-\d{2})", re.MULTILINE)
 SUPERSEDED_DECLARATION_RE = re.compile(r"^\s*-\s*废弃[:：]\s*(C-\d{3}[A-Z]?)\s*$", re.MULTILINE)
 
 
@@ -257,14 +346,33 @@ class Result:
     solution_covered: set[str] = field(default_factory=set)
     decision_ids: set[str] = field(default_factory=set)
     superseded_decisions: dict[str, str] = field(default_factory=dict)
+    supersedes_fields: dict[str, list[str]] = field(default_factory=dict)
     test_anchored: set[str] = field(default_factory=set)
     test_anchored_acceptance_criteria: set[str] = field(default_factory=set)
     goals: set[str] = field(default_factory=set)
     tasks: dict[str, int] = field(default_factory=dict)
     task_states: dict[str, str] = field(default_factory=dict)
     task_line_counts: dict[str, int] = field(default_factory=dict)
+    risk_counts: dict[str, int] = field(default_factory=dict)
     legacy_cutoff: date | None = None
-    task_line_counts: dict[str, int] = field(default_factory=dict)
+    spec_version: int = 0
+
+
+def normalize_text(text: str) -> str:
+    """Normalize a leading BOM and CRLF/CR line endings before any parsing.
+
+    Windows checkouts (autocrlf/eol=crlf) and BOM-prefixed editors otherwise
+    defeat the `^---\\n` frontmatter anchor and every line-anchored rule, so a
+    healthy repository reads as all-red; only what lint sees is canonical,
+    repository bytes stay untouched.
+    """
+    if text.startswith("\ufeff"):
+        text = text.lstrip("\ufeff")
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def code_fence_lines(text: str) -> int:
+    return sum(1 for line in text.splitlines() if line.strip().startswith("```"))
 
 
 def read_text_checked(path: Path, result: Result, label: str) -> str | None:
@@ -274,15 +382,26 @@ def read_text_checked(path: Path, result: Result, label: str) -> str | None:
     the agent must fix; a traceback would abort the whole lint run and hide
     every other finding, so the failure is recorded per file and the caller
     skips that file while the remaining checks keep running.
+
+    An odd number of ``` lines is recorded as an error here: strip_code_fences
+    would silently drop everything after the stray fence, so content past it
+    escapes every line-anchored check (fail-open) unless the imbalance fails
+    the run.
     """
     try:
-        return path.read_text(encoding="utf-8")
+        text = normalize_text(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError) as error:
         result.errors.append(
             f"{label}: cannot read file ({error.__class__.__name__}: {error});"
             " fix the file encoding or permissions, then rerun"
         )
         return None
+    if code_fence_lines(text) % 2:
+        result.errors.append(
+            f"{label}: unbalanced code fence (odd number of ``` lines);"
+            " lint skips everything after a stray fence, so close or remove it"
+        )
+    return text
 
 
 def parse_frontmatter(text: str) -> dict[str, str] | None:
@@ -295,6 +414,16 @@ def parse_frontmatter(text: str) -> dict[str, str] | None:
             key, _, value = line.partition(":")
             fields[key.strip()] = value.strip()
     return fields
+
+
+def frontmatter_block(text: str) -> str:
+    """Return the raw frontmatter body (without --- delimiters), or "".
+
+    parse_frontmatter collapses duplicate keys silently, so checks that must
+    define duplicate-line behavior read this raw block instead.
+    """
+    match = re.match(r"^---\n(.*?)\n---\n", text, re.DOTALL)
+    return match.group(1) if match else ""
 
 
 def duplicate_ids(ids: list[str]) -> set[str]:
@@ -421,15 +550,27 @@ def head_decision_text(root: Path) -> str:
     )
 
 
+# CJK calibration (2026-11, same rationale as HEXISH_TOKEN): Python \b is
+# blind to CJK adjacency, so "源自决策C-001，见R-01-001" hides both ids from
+# \b... — the boundary is an explicit ASCII-alnum lookaround instead. CJK may
+# touch an id directly; an ASCII letter/digit may not (C-001B would be a
+# different token family this regex must not claim).
 DECISION_ID_RE = re.compile(
-    r"\b(?:R-\d{2}-\d{3}/AC-\d{2}|R-\d{2}-\d{3}|T-\d{3}|G-\d+|NG-\d+|C-\d{3}[A-Z]?)\b"
+    r"(?<![0-9A-Za-z])(?:R-\d{2}-\d{3}/AC-\d{2}|R-\d{2}-\d{3}|T-\d{3}|G-\d+|NG-\d+|C-\d{3}[A-Z]?)(?![0-9A-Za-z])"
 )
 
 
 def decision_entry_signature(body: str) -> tuple:
     """Semantic identity of one entry: heading, date, ID/evidence/number multisets."""
-    lines = body.splitlines()
-    heading = lines[0].rstrip() if lines else ""
+    # Heading markers are normalized (### vs #) so a v2 single-file slice and
+    # its v3 directory file carry the same signature across the migration; the
+    # canonical v3 entry format puts a blank line between the frontmatter and
+    # the heading, so the heading is the first non-blank line, not line 0.
+    heading = ""
+    for line in body.splitlines():
+        if line.strip():
+            heading = re.sub(r"^#+\s*", "", line.rstrip())
+            break
     date_match = re.search(r"^日期:.*$", body, re.MULTILINE)
     date = date_match.group(0).rstrip() if date_match else ""
     ids = tuple(sorted(DECISION_ID_RE.findall(body)))
@@ -466,6 +607,177 @@ def decision_transition_failure(old_text: str, new_text: str) -> str | None:
             return "decision %s replaced by %s" % (old_cid, new_cid)
         if old_signature != new_signature:
             return "decision %s changed identity or semantics" % old_cid
+    return None
+
+
+def decision_entry_body(text: str) -> str:
+    """Body of a v3 entry file: everything after the frontmatter block."""
+    match = re.match(r"^---\n.*?\n---\n", text, re.DOTALL)
+    return text[match.end():] if match else text
+
+
+def rationale_store_text(root: Path) -> str | None:
+    r"""Joined entry bodies of the v3 decision store, or None when absent.
+
+    Solution locators and task evidence anchors written against the v2
+    single-file form (RATIONALE.md#C-021) keep resolving after the archive
+    becomes a directory: the anchor is matched against the joined entry
+    bodies instead of failing on the missing literal file.
+    """
+    if not (root / RATIONALE_DIR).is_dir():
+        return None
+    parts = []
+    for path in rationale_entry_paths(root):
+        try:
+            parts.append(decision_entry_body(path.read_text(encoding="utf-8")))
+        except UnicodeDecodeError:
+            return None
+    return "\n".join(parts)
+
+
+def rationale_entry_paths(root: Path) -> list[Path]:
+    directory = root / RATIONALE_DIR
+    if not directory.is_dir():
+        return []
+    return sorted(path for path in directory.rglob("*.md") if path.name not in DECISION_STORE_NON_ENTRIES)
+
+
+def head_decision_entry_ids(root: Path, result: Result) -> set[str]:
+    """Decision ids tracked at HEAD in the v3 directory form."""
+    try:
+        listing = run_git(root, ["ls-tree", "-r", "--name-only", "HEAD", "--", RATIONALE_DIR])
+    except GitCommandError as error:
+        git_data_error(result, "decision-archive discovery failed", error)
+        return set()
+    ids: set[str] = set()
+    for line in listing.splitlines():
+        name_match = DECISION_ENTRY_FILE_RE.match(Path(line).name)
+        if name_match:
+            ids.add(name_match.group(1))
+    return ids
+
+
+def ref_decision_store(root: Path, ref: str) -> dict[str, str]:
+    """Decision store at a ref as {relative path: text}; {} when the ref has none.
+
+    One entry per file in the v3 form; the v2 single file (and the pre-rename
+    DECISIONS.md) resolve to a one-key store, so one comparison logic audits
+    every historical commit regardless of the form it carried. Structural
+    files (the historical v3 index, .gitkeep) are kept as their own keys
+    (entries empty) so an entry-free directory still counts as a store:
+    presence, not entry count, gates history audits.
+    """
+    try:
+        listing = run_git(root, ["ls-tree", "-r", "--name-only", ref, "--", RATIONALE_DIR])
+    except GitCommandError:
+        listing = ""
+    if listing.strip():
+        store: dict[str, str] = {}
+        for line in listing.splitlines():
+            if Path(line).name in DECISION_STORE_NON_ENTRIES:
+                # Structural files (the historical v3 index, the .gitkeep
+                # placeholder) mark the store's presence without entries.
+                store[line] = ""
+                continue
+            text = git_ref_text(root, ref, Path(line))
+            if text is not None:
+                store[line] = text
+        return store
+    for name in APPEND_ONLY_FILES:
+        text = git_ref_text(root, ref, Path(name))
+        if text is not None:
+            return {name: text}
+    return {}
+
+
+def store_decision_ids(store: dict[str, str]) -> set[str]:
+    ids: set[str] = set()
+    for relative, text in store.items():
+        name_match = DECISION_ENTRY_FILE_RE.match(Path(relative).name)
+        if name_match:
+            ids.add(name_match.group(1))
+        else:
+            ids.update(C_HEADING_RE.findall(decision_entries(text)))
+    return ids
+
+
+def decision_migration_failure(
+    file_store: dict[str, str], dir_store: dict[str, str], old_is_file: bool
+) -> str | None:
+    """Equivalence gate for a commit that switches the decision store's form.
+
+    Entries must correspond one-to-one (single-file document order vs
+    directory filename order) with unchanged signatures, so a form change
+    cannot smuggle semantic edits past the history audit. The same check
+    covers the v2->v3 migration and its theoretical reverse. An empty old
+    side is an initial population (an append on an empty store, which
+    append-only permits); a non-empty old side emptied out is history loss.
+    """
+    file_name = next((name for name in ("RATIONALE.md", "DECISIONS.md") if name in file_store), None)
+    if not file_name:
+        return "decision store switched form without a single-file side"
+    file_entries = decision_entry_signatures(decision_entries(file_store[file_name]))
+    dir_entries = []
+    for relative in sorted(dir_store):
+        if Path(relative).name in DECISION_STORE_NON_ENTRIES:
+            continue
+        name_match = DECISION_ENTRY_FILE_RE.match(Path(relative).name)
+        if not name_match:
+            return f"migration produced {relative}, which is not a <C-ID>-<slug>.md entry"
+        dir_entries.append(
+            (name_match.group(1), decision_entry_signature(decision_entry_body(dir_store[relative])))
+        )
+    old_entries = file_entries if old_is_file else dir_entries
+    new_entries = dir_entries if old_is_file else file_entries
+    if not old_entries:
+        return None
+    if not new_entries:
+        return "migration removed every decision entry"
+    if [cid for cid, _ in old_entries] != [cid for cid, _ in new_entries]:
+        return "migration changed the decision set"
+    for (old_cid, old_signature), (new_cid, new_signature) in zip(old_entries, new_entries):
+        if old_cid != new_cid:
+            return f"migration replaced decision {old_cid} with {new_cid}"
+        if old_signature != new_signature:
+            return f"migration changed decision {old_cid} identity or semantics"
+    return None
+
+
+def decision_store_transition_failure(
+    old_store: dict[str, str], new_store: dict[str, str]
+) -> str | None:
+    """Audit one commit's decision-store transition across the v2 and v3 forms.
+
+    Same-form transitions compare entry by entry (v2: sliced entries inside
+    the single file; v3: whole files, one entry each). A form change is the
+    one-shot migration and must preserve every entry's signature.
+    """
+    old_file = next((name for name in ("RATIONALE.md", "DECISIONS.md") if name in old_store), None)
+    new_file = next((name for name in ("RATIONALE.md", "DECISIONS.md") if name in new_store), None)
+    if old_file and new_file:
+        failure = decision_transition_failure(
+            decision_entries(old_store[old_file]), decision_entries(new_store[new_file])
+        )
+        return f"{old_file} {failure}" if failure else None
+    if old_file != new_file:
+        if old_file:
+            return decision_migration_failure(old_store, new_store, True)
+        return decision_migration_failure(new_store, old_store, False)
+
+    def entry_cid(relative: str) -> str | None:
+        name_match = DECISION_ENTRY_FILE_RE.match(Path(relative).name)
+        return name_match.group(1) if name_match else None
+
+    old_by_cid = {entry_cid(rel): rel for rel in old_store if entry_cid(rel)}
+    new_by_cid = {entry_cid(rel): rel for rel in new_store if entry_cid(rel)}
+    for cid, old_relative in sorted(old_by_cid.items()):
+        if cid not in new_by_cid:
+            return f"removed existing history ({old_relative})"
+        new_relative = new_by_cid[cid]
+        if decision_entry_signature(decision_entry_body(old_store[old_relative])) != decision_entry_signature(
+            decision_entry_body(new_store[new_relative])
+        ):
+            return f"{new_relative}: decision changed identity or semantics"
     return None
 
 
@@ -524,6 +836,13 @@ def check_markdown_locator(root: Path, result: Result, owner: str, locator: str)
         result.errors.append(f"{owner}: unsafe solution locator {locator}")
         return
     target = root / relative
+    store_text = rationale_store_text(root) if relative.as_posix() == "RATIONALE.md" else None
+    if store_text is not None:
+        if not re.search(rf"^#{{1,6}}\s+{re.escape(heading)}\s*$", store_text, re.MULTILINE):
+            result.errors.append(
+                f"{owner}: missing solution locator heading {locator} (decision archive is a directory)"
+            )
+        return
     if not target.is_file():
         result.errors.append(f"{owner}: missing solution locator file {relative.as_posix()}")
         return
@@ -664,32 +983,22 @@ def check_implementation_readiness(root: Path, solution: str, result: Result) ->
             result.errors.append(f"SOLUTION.md: implementation readiness condition {name} needs path.md#heading evidence")
 
 
-def git_changed_paths(root: Path) -> set[str]:
+def git_changed_paths(root: Path, result: Result) -> set[str]:
     try:
-        changed = subprocess.run(
-            ["git", "diff", "--name-only", "HEAD", "--"],
-            cwd=root,
-            check=False,
-            capture_output=True,
-            text=True,
-        ).stdout.splitlines()
-        return set(changed)
-    except OSError:
+        changed = run_git(root, ["diff", "--name-only", "HEAD", "--"])
+    except GitCommandError as error:
+        git_data_error(result, "changed-path discovery failed", error)
         return set()
+    return set(changed.splitlines())
 
 
-def git_untracked_paths(root: Path) -> set[str]:
+def git_untracked_paths(root: Path, result: Result) -> set[str]:
     try:
-        untracked = subprocess.run(
-            ["git", "ls-files", "--others", "--exclude-standard"],
-            cwd=root,
-            check=False,
-            capture_output=True,
-            text=True,
-        ).stdout.splitlines()
-        return set(untracked)
-    except OSError:
+        untracked = run_git(root, ["ls-files", "--others", "--exclude-standard"])
+    except GitCommandError as error:
+        git_data_error(result, "untracked-path discovery failed", error)
         return set()
+    return set(untracked.splitlines())
 
 
 @contextmanager
@@ -772,6 +1081,9 @@ def check_system_files(root: Path, result: Result, changed: set[str]) -> None:
                 f"conflict: both {canonical} and legacy {legacy[0]} exist; remove one"
             )
             continue
+        if canonical == "RATIONALE.md" and (root / RATIONALE_DIR).is_dir():
+            check_rationale_store(root, result, changed)
+            continue
         name, (doc_type, mutation, id_prefix) = canonical, expected_file
         if not path.exists() and legacy:
             name, doc_type = legacy
@@ -837,6 +1149,278 @@ def check_system_files(root: Path, result: Result, changed: set[str]) -> None:
                     f"{name}: new decision entry contains implementation evidence; "
                     "code paths, commits, and solution details belong in SOLUTION"
                 )
+        if canonical == "RATIONALE.md" and result.spec_version >= 3:
+            result.warnings.append(
+                "RATIONALE.md: v2 single-file decision store; rerun bootstrap to "
+                "migrate to the RATIONALE/ directory (spec v3)"
+            )
+
+
+def check_rationale_store(root: Path, result: Result, changed: set[str]) -> None:
+    """v3 directory form: one frozen file per decision, no required index.
+
+    Content-freeze and evidence checks only touch entries inside the pending
+    change, so a thousand-entry archive costs one ls-tree plus a handful of
+    git shows instead of a full re-read.
+    """
+    single = root / "RATIONALE.md"
+    if single.is_file():
+        result.errors.append(
+            "conflict: RATIONALE/ directory and RATIONALE.md both exist; "
+            "rerun bootstrap to finish the v3 migration"
+        )
+    elif (root / "DECISIONS.md").is_file():
+        result.errors.append(
+            "conflict: RATIONALE/ directory and legacy DECISIONS.md both exist; "
+            "finish the legacy migration first"
+        )
+    try:
+        head_names = run_git(
+            root, ["ls-tree", "-r", "--name-only", "HEAD", "--", RATIONALE_DIR]
+        ).splitlines()
+    except GitCommandError as error:
+        git_data_error(result, "decision-archive discovery failed", error)
+        head_names = []
+    head_by_cid: dict[str, str] = {}
+    for name in head_names:
+        if Path(name).name in DECISION_STORE_NON_ENTRIES:
+            continue
+        name_match = DECISION_ENTRY_FILE_RE.match(Path(name).name)
+        if name_match:
+            head_by_cid[name_match.group(1)] = name
+    max_head = 0
+    for cid in head_by_cid:
+        if re.fullmatch(r"C-\d{3}", cid):
+            max_head = max(max_head, int(cid[2:5]))
+    # Migration boundary: when HEAD carries the v2 single-file store instead of
+    # the directory, its entries are known history, not new decisions. The
+    # boundary view is derived here (mirroring the ref_decision_store fallback)
+    # so the evidence gate and new-id rules exempt migrated entries while the
+    # decision_migration_failure audit below still verifies the migration byte
+    # for byte at the signature level.
+    head_file_name = ""
+    head_file_text = ""
+    if not head_by_cid:
+        for name in APPEND_ONLY_FILES:
+            text = git_head_text(root, Path(name))
+            if text is not None:
+                head_file_name, head_file_text = name, text
+                break
+    boundary_ids: set[str] = set()
+    if head_file_text:
+        boundary_ids = {
+            cid for cid, _ in decision_entry_signatures(decision_entries(head_file_text))
+        }
+    entries: dict[str, tuple[str, str]] = {}
+    seen_ids: set[str] = set()
+    pending_supersedes: list[tuple[str, str, str]] = []
+    for path in rationale_entry_paths(root):
+        relative = path.relative_to(root).as_posix()
+        name_match = DECISION_ENTRY_FILE_RE.match(path.name)
+        if not name_match:
+            result.errors.append(f"{relative}: decision entry file must be named <C-ID>-<slug>.md")
+            continue
+        cid = name_match.group(1)
+        text = read_text_checked(path, result, relative)
+        if text is None:
+            continue
+        fm = parse_frontmatter(text)
+        if fm is None:
+            result.errors.append(f"{relative}: missing frontmatter")
+            continue
+        for key, value in (("doc-type", "rationale"), ("mutation", "append-only")):
+            if fm.get(key) != value:
+                result.errors.append(f"{relative}: {key} should be {value}, got {fm.get(key)}")
+        if fm.get("id") != cid:
+            result.errors.append(f"{relative}: id should be {cid}, got {fm.get('id')}")
+        if not fm.get("owner"):
+            result.errors.append(f"{relative}: missing owner")
+        raw_fm = frontmatter_block(text)
+        supersede_lines = SUPERSEDES_LINE_RE.findall(raw_fm)
+        if len(supersede_lines) > 1:
+            result.errors.append(f"{relative}: more than one supersedes line in frontmatter")
+        for token in re.split(r"[,;，；、\s]+", " ".join(supersede_lines)):
+            if not token:
+                continue
+            if not re.fullmatch(DECISION_CID_PATTERN, token):
+                result.errors.append(
+                    f"{relative}: supersedes value should be a decision id, got {token}"
+                )
+                continue
+            if token == cid:
+                result.errors.append(f"{relative}: decision {cid} cannot supersede itself")
+                continue
+            pending_supersedes.append((relative, cid, token))
+            if SUPERSEDED_DECLARATION_RE.search(decision_entry_body(text)):
+                result.warnings.append(
+                    f"{relative}: declares supersession in both the supersedes field and "
+                    "prose; keep one channel"
+                )
+        if not supersede_lines and fm.get("supersedes") is not None:
+            result.errors.append(
+                f"{relative}: supersedes value should be a decision id, "
+                f"got {fm.get('supersedes') or '(empty)'}"
+            )
+        first_body_line = next(
+            (line for line in decision_entry_body(text).splitlines() if line.strip()), ""
+        )
+        if not re.match(rf"^#\s+{re.escape(cid)}(\s|$)", first_body_line):
+            result.errors.append(
+                f"{relative}: entry body must open with `# {cid} <标题>`"
+            )
+        if cid in seen_ids:
+            result.errors.append(f"{relative}: duplicate decision id {cid}")
+        seen_ids.add(cid)
+        entries[relative] = (cid, text)
+    for cid, head_relative in sorted(head_by_cid.items()):
+        if cid not in seen_ids and head_relative in changed:
+            result.errors.append(f"RATIONALE: removed existing history ({head_relative})")
+    known_ids = seen_ids | boundary_ids
+    field_map: dict[str, list[str]] = {}
+    for relative, cid, target in pending_supersedes:
+        if target not in known_ids:
+            result.errors.append(f"{relative}: supersedes target {target} does not exist")
+            continue
+        field_map.setdefault(target, []).append(cid)
+    for target, successors in sorted(field_map.items()):
+        if len(successors) > 1:
+            result.errors.append(
+                f"RATIONALE: decision {target} is superseded more than once "
+                f"({', '.join(successors)})"
+            )
+    result.supersedes_fields = field_map
+    for relative, (cid, text) in entries.items():
+        if relative not in changed:
+            continue
+        head_relative = head_by_cid.get(cid)
+        if head_relative is None:
+            continue
+        old_text = git_head_text(root, Path(head_relative))
+        if old_text is None:
+            continue
+        if decision_entry_signature(decision_entry_body(old_text)) != decision_entry_signature(
+            decision_entry_body(text)
+        ):
+            result.errors.append(
+                f"{relative}: append-only content decision changed identity or semantics"
+            )
+    if head_file_text:
+        # The working tree switched the store's form: audit the migration with
+        # the same signature-equivalence gate the push-side history audit uses,
+        # instead of skipping the append-only audit at the boundary commit.
+        worktree_store = {relative: entry[1] for relative, entry in entries.items()}
+        failure = decision_migration_failure(
+            {head_file_name: head_file_text}, worktree_store, True
+        )
+        if failure:
+            result.errors.append(f"RATIONALE: {failure}")
+    for relative, (cid, text) in entries.items():
+        if cid in head_by_cid or cid in boundary_ids:
+            continue
+        if re.fullmatch(r"C-\d{3}[A-Z]", cid):
+            result.errors.append(f"{relative}: new decision id {cid} cannot use a legacy suffix")
+        elif re.fullmatch(r"C-\d{3}", cid) and int(cid[2:5]) <= max_head:
+            result.errors.append(
+                f"{relative}: new decision id {cid} does not exceed the highest existing id C-{max_head:03d}"
+            )
+        if DECISION_EVIDENCE_RE.search(strip_code_fences(decision_entry_body(text))):
+            result.errors.append(
+                f"{relative}: new decision entry contains implementation evidence; "
+                "code paths, commits, and solution details belong in SOLUTION"
+            )
+
+
+def check_receipts(root: Path, result: Result, changed: set[str]) -> None:
+    """Optional receipts/ archive: one write-once run record per empirical task.
+
+    Runs only when the repo creates receipts/. A receipt binds to exactly one
+    task via both its file name and its task back-link; multiple receipts per
+    task are legal (one per run). Receipts are frozen once written: a later
+    edit or delete breaks the evidence chain, so both are lint errors and a
+    new run gets a new receipt file. Receipts predating the contract (tracked,
+    untouched, non-conforming) downgrade to warnings with a sanctioned path:
+    a dedicated metadata-only commit completes their frontmatter while the
+    run content stays frozen.
+    """
+    receipts_dir = root / RECEIPTS_DIR
+    if not receipts_dir.is_dir():
+        return
+    try:
+        head_names = run_git(
+            root, ["ls-tree", "-r", "--name-only", "HEAD", "--", RECEIPTS_DIR]
+        ).splitlines()
+    except GitCommandError as error:
+        git_data_error(result, "receipt discovery failed", error)
+        head_names = []
+    texts: dict[str, str] = {}
+    for path in sorted(receipts_dir.rglob("*.md")):
+        relative = path.relative_to(root).as_posix()
+        name_match = RECEIPT_FILE_RE.match(path.name)
+        if not name_match:
+            result.errors.append(f"{relative}: receipt file must be named <T-ID>-<slug>.md")
+            continue
+        task_id = name_match.group(1)
+        text = read_text_checked(path, result, relative)
+        if text is None:
+            continue
+        texts[relative] = text
+        problems: list[str] = []
+        fm = parse_frontmatter(text)
+        if fm is None:
+            problems.append(f"{relative}: missing frontmatter")
+        else:
+            if fm.get("doc-type") != "receipt":
+                problems.append(
+                    f"{relative}: doc-type should be receipt, got {fm.get('doc-type')}"
+                )
+            fm_task = fm.get("task", "")
+            if not fm_task:
+                problems.append(f"{relative}: missing task back-link")
+            elif not re.fullmatch(r"T-\d{3}", fm_task):
+                problems.append(f"{relative}: task should be T-nnn, got {fm_task}")
+            elif fm_task != task_id:
+                problems.append(f"{relative}: task should be {task_id}, got {fm_task}")
+            elif not any((root / "tasks").rglob(f"{task_id}-*.md")):
+                problems.append(
+                    f"{relative}: task back-link points to missing task {task_id}"
+                )
+            if not RECEIPT_DATE_RE.fullmatch(fm.get("日期", "")):
+                problems.append(
+                    f"{relative}: 日期 should be YYYY-MM-DD, got {fm.get('日期') or 'missing'}"
+                )
+        # 新写入或本次触及的回执必须完整合规;存量且未触及的旧回执降级为
+        # warning——硬报错会让带旧回执的仓库在升级 lint 后无法提交任何
+        # 变更。整理走专项元数据补全提交(正文冻结不变),见下方冻结分支。
+        if relative in changed or relative not in head_names:
+            result.errors.extend(problems)
+        else:
+            result.warnings.extend(
+                f"{problem} (legacy receipt; normalize metadata in a dedicated commit)"
+                for problem in problems
+            )
+    for name in head_names:
+        if not name.endswith(".md"):
+            continue
+        if name not in texts and name in changed:
+            result.errors.append(
+                f"{name}: receipt was deleted or moved; restore it or record "
+                "the replacement run in a new receipt"
+            )
+        elif name in texts and name in changed:
+            old = git_head_text(root, Path(name))
+            if old is not None and old != texts[name]:
+                if decision_entry_body(old) == decision_entry_body(texts[name]):
+                    # 元数据补全:正文逐字节不变,只动 frontmatter——存量回执
+                    # 迁入契约的受控通道;正文一旦变化仍走硬错
+                    result.warnings.append(
+                        f"{name}: receipt frontmatter changed with run content "
+                        "unchanged (legacy contract adoption); verify only metadata moved"
+                    )
+                else:
+                    result.errors.append(
+                        f"{name}: receipt is frozen (write-once run record); "
+                        "record the new run in a new receipt"
+                    )
 
 
 def check_todo_entries(root: Path, result: Result) -> None:
@@ -873,7 +1457,11 @@ def check_core_document_budget(root: Path, result: Result) -> None:
             "the core document size gate stays disabled until it is"
         )
         return
-    limit = int(match.group(1)) * CORE_BUDGET_BYTES_PER_TOKEN
+    registered = int(match.group(1))
+    if match.group(2) == "token":
+        limit = registered * CORE_BUDGET_BYTES_PER_TOKEN
+    else:
+        limit = registered
     total = 0
     for name in CORE_BUDGET_FILES:
         file_path = root / name
@@ -886,11 +1474,32 @@ def check_core_document_budget(root: Path, result: Result) -> None:
         return
     detail = (
         f"core documents total {total} bytes (PRD+SOLUTION+DOMAIN+CONVENTIONS+AGENTS.md) "
-        f"over the registered limit {match.group(1)} token × {CORE_BUDGET_BYTES_PER_TOKEN} "
-        f"bytes = {limit} bytes"
+        f"over the registered limit {match.group(1)} {match.group(2)} = {limit} bytes"
     )
     if CORE_SPLIT_PLAN_RE.search(text):
-        result.warnings.append(f"{detail}; the registered 核心文档分片方案 covers the transition")
+        plan_line_match = re.search(r"^- 核心文档分片方案:.*$", text, re.MULTILINE)
+        deadline_match = (
+            CORE_SPLIT_DEADLINE_RE.search(plan_line_match.group(0))
+            if plan_line_match
+            else None
+        )
+        if deadline_match:
+            try:
+                deadline = date.fromisoformat(deadline_match.group(1))
+            except ValueError:
+                deadline = None
+            if deadline is not None and date.today() > deadline:
+                result.errors.append(
+                    f"{detail}; the registered 核心文档分片方案 deadline "
+                    f"{deadline_match.group(1)} has passed — reorganize now or register a new deadline"
+                )
+                return
+        suffix = (
+            f", deadline {deadline_match.group(1)}" if deadline_match else ""
+        )
+        result.warnings.append(
+            f"{detail}; the registered 核心文档分片方案 covers the transition{suffix}"
+        )
     else:
         result.errors.append(
             f"{detail}; reorganize the current-state layer or register a "
@@ -904,6 +1513,9 @@ def id_scan_files(root: Path) -> list[Path]:
         if canonical == "CONVENTIONS.md":
             # CONVENTIONS documents the id formats themselves; scanning it
             # would flag the format examples as malformed ids.
+            continue
+        if canonical == "RATIONALE.md" and (root / RATIONALE_DIR).is_dir():
+            paths.extend(rationale_entry_paths(root))
             continue
         path = root / canonical
         legacy = LEGACY_MAP_FILES.get(canonical)
@@ -928,7 +1540,7 @@ def check_id_formats(root: Path, result: Result) -> None:
     for path in id_scan_files(root):
         relative = path.relative_to(root).as_posix()
         try:
-            text = strip_code_fences(path.read_text(encoding="utf-8"))
+            text = strip_code_fences(normalize_text(path.read_text(encoding="utf-8")))
         except UnicodeDecodeError:
             result.errors.append(
                 f"{relative}: file is not valid UTF-8; re-save it with UTF-8 encoding"
@@ -984,6 +1596,8 @@ STYLE_NOUN_BREAKERS = set(
 
 
 def style_prose_exempt(path: Path) -> bool:
+    if path.parent.name == RATIONALE_DIR:
+        return True
     return path.name in STYLE_PROSE_EXEMPT_FILES
 
 
@@ -1030,6 +1644,85 @@ def max_noun_stack(text: str) -> int:
     return longest
 
 
+MIN_APPEND_HUNK_LINES = 6
+
+
+def check_revision_discipline(root: Path, result: Result, changed: set[str]) -> None:
+    """B 修订纪律:活文档在既有标题下的整块纯追加给 warning。
+
+    活文档应改写原节并显式废弃旧结论;既有标题下无删行的整块追加疑似
+    同主题平行堆叠。启发式只看 diff 形状,不判语义:新增自带标题、表格行
+    或伴随删行的块都按正常修订放行,每文件最多提示一次。
+    """
+    for name in sorted(changed & set(CORE_BUDGET_FILES)):
+        try:
+            diff = run_git(root, ["diff", "HEAD", "--", name])
+        except GitCommandError as error:
+            git_data_error(result, name, error)
+            continue
+        hunks: list[tuple[int, int, list[str], int]] = []
+        added: list[str] = []
+        removed = 0
+        ctx_before = 0
+        new_start = 0
+        for line in diff.splitlines():
+            marker = re.match(r"@@ -\d+(?:,\d+)? \+(\d+)", line)
+            if marker:
+                if added:
+                    hunks.append((new_start, ctx_before, added, removed))
+                new_start = int(marker.group(1))
+                added, removed, ctx_before = [], 0, 0
+            elif line.startswith("+") and not line.startswith("+++"):
+                added.append(line[1:])
+            elif line.startswith("-") and not line.startswith("---"):
+                removed += 1
+            elif line.startswith(" ") and not added:
+                ctx_before += 1
+        if added:
+            hunks.append((new_start, ctx_before, added, removed))
+        for new_start, ctx_before, added, removed in hunks:
+            if removed or len(added) < MIN_APPEND_HUNK_LINES:
+                continue
+            if any(re.match(r"#{1,6}\s+\S", line) or line.lstrip().startswith("|") for line in added):
+                continue
+            text = (root / name).read_text(encoding="utf-8", errors="replace")
+            lines = text.splitlines()
+            heading = ""
+            for index in range(min(new_start + ctx_before - 2, len(lines) - 1), -1, -1):
+                heading_match = re.match(r"(#{1,6}\s+\S.*)", lines[index])
+                if heading_match:
+                    heading = heading_match.group(1).strip()
+                    break
+            if not heading:
+                continue
+            result.warnings.append(
+                f"{name}: 标题「{heading}」下出现 {len(added)} 行纯追加块——修订纪律建议改写原节"
+                "并显式废弃旧结论,而非平行堆叠同主题内容(启发式,仅供人工判断)"
+            )
+            break
+
+
+STYLE_SCAN_OFF_RE = re.compile(r"^- 写作风格扫描:\s*停用\s*$", re.MULTILINE)
+
+
+def writing_style_disabled(root: Path) -> bool:
+    """Per-repo opt-out for the writing-style scan, registered in CONVENTIONS.
+
+    The 2026-11 registry survey found three repositories that surgically
+    removed the style check from their local lint copy after the early
+    blocking-era rollout; without a supported switch, every framework refresh
+    would resurrect what the owner deliberately removed and push the repo to
+    fork the lint file (a third drift source). Only the exact value 停用
+    disables the scan; absence or any other value keeps it on, and every
+    other check is unaffected.
+    """
+    try:
+        text = (root / "CONVENTIONS.md").read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return False
+    return bool(STYLE_SCAN_OFF_RE.search(text))
+
+
 def check_writing_style(root: Path, result: Result, changed: set[str]) -> None:
     # Dirty tree (pre-commit / staged): only flag files inside the pending change
     # (staged or unstaged edits, plus untracked new files) so historical warnings
@@ -1038,6 +1731,9 @@ def check_writing_style(root: Path, result: Result, changed: set[str]) -> None:
     # real git dir, so git diff HEAD equals the staged change set.
     paths = []
     for name in STYLE_FILES:
+        if name == "RATIONALE.md" and (root / RATIONALE_DIR).is_dir():
+            paths.extend(rationale_entry_paths(root))
+            continue
         path = root / name
         if path.is_file():
             paths.append(path)
@@ -1048,10 +1744,10 @@ def check_writing_style(root: Path, result: Result, changed: set[str]) -> None:
     tasks_dir = root / "tasks"
     task_paths = set()
     if tasks_dir.is_dir():
-        task_entries = sorted(tasks_dir.glob("*.md"))
+        task_entries = sorted(tasks_dir.rglob("*.md"))
         paths.extend(task_entries)
         task_paths.update(entry.relative_to(root).as_posix() for entry in task_entries)
-    scan = changed | git_untracked_paths(root)
+    scan = changed | git_untracked_paths(root, result)
     scan_all = not scan
     for path in paths:
         relative = path.relative_to(root).as_posix()
@@ -1123,23 +1819,46 @@ def check_traceability(root: Path, result: Result) -> None:
     prd_path = root / "PRD.md"
     solution_path = resolve_map_file(root, "SOLUTION.md")
     domain_path = root / "DOMAIN.md"
-    decisions_path = resolve_map_file(root, "RATIONALE.md")
+    rationale_dir = root / RATIONALE_DIR
+    dir_form = rationale_dir.is_dir()
+    decisions_path = rationale_dir if dir_form else resolve_map_file(root, "RATIONALE.md")
     if not all(path and path.exists() for path in (prd_path, solution_path, domain_path, decisions_path)):
         return
 
     prd = read_text_checked(prd_path, result, "PRD.md")
     solution = read_text_checked(solution_path, result, solution_path.name)
     domain = read_text_checked(domain_path, result, "DOMAIN.md")
-    decisions = read_text_checked(decisions_path, result, decisions_path.name)
-    if None in (prd, solution, domain, decisions):
+    if None in (prd, solution, domain):
         return
+    if dir_form:
+        store_label = f"{RATIONALE_DIR}/"
+        entry_bodies: list[str] = []
+        entry_ids: list[str] = []
+        for path in rationale_entry_paths(root):
+            text = read_text_checked(path, result, path.relative_to(root).as_posix())
+            if text is None:
+                return
+            entry_match = DECISION_ENTRY_FILE_RE.match(path.name)
+            if entry_match:
+                entry_ids.append(entry_match.group(1))
+            entry_bodies.append(decision_entry_body(text))
+        decisions_plain = strip_code_fences("\n\n".join(entry_bodies))
+        decision_ids = entry_ids
+        old_decision_ids = store_decision_ids(ref_decision_store(root, "HEAD"))
+    else:
+        decisions = read_text_checked(decisions_path, result, decisions_path.name)
+        if decisions is None:
+            return
+        store_label = decisions_path.name
+        decisions_plain = strip_code_fences(decisions)
+        decision_ids = C_HEADING_RE.findall(decisions_plain)
+        old_decision_ids = set(C_HEADING_RE.findall(head_decision_text(root)))
     conventions_path = root / "CONVENTIONS.md"
     conventions = ""
     if conventions_path.is_file():
         conventions = read_text_checked(conventions_path, result, "CONVENTIONS.md") or ""
     prd_plain = strip_code_fences(prd)
     solution_plain = strip_code_fences(solution)
-    decisions_plain = strip_code_fences(decisions)
     conventions_plain = strip_code_fences(conventions)
     legacy_requirement_ids = LEGACY_R_HEADING_RE.findall(prd_plain)
     for rid in legacy_requirement_ids:
@@ -1166,10 +1885,7 @@ def check_traceability(root: Path, result: Result) -> None:
     goal_ids = GOAL_RE.findall(prd_plain)
     non_goal_ids = NON_GOAL_RE.findall(prd_plain)
     result.goals = set(goal_ids)
-    decision_ids = C_HEADING_RE.findall(decisions_plain)
     result.decision_ids = set(decision_ids)
-    old_decisions = head_decision_text(root)
-    old_decision_ids = set(C_HEADING_RE.findall(old_decisions))
 
     superseded: dict[str, str] = {}
     entry_matches = list(C_HEADING_RE.finditer(decisions_plain))
@@ -1178,14 +1894,61 @@ def check_traceability(root: Path, result: Result) -> None:
         block = decisions_plain[entry_match.end():block_end]
         for declaration in SUPERSEDED_DECLARATION_RE.findall(block):
             if declaration == entry_match.group(1):
-                result.errors.append(f"RATIONALE.md: decision {declaration} cannot supersede itself")
+                result.errors.append(f"{store_label}: decision {declaration} cannot supersede itself")
             elif declaration in superseded:
-                result.errors.append(f"RATIONALE.md: decision {declaration} is superseded more than once")
+                result.errors.append(f"{store_label}: decision {declaration} is superseded more than once")
             else:
                 superseded[declaration] = entry_match.group(1)
     for cid, successor in sorted(superseded.items()):
         if cid not in result.decision_ids:
-            result.errors.append(f"RATIONALE.md: superseded decision {cid} does not exist")
+            result.errors.append(f"{store_label}: superseded decision {cid} does not exist")
+    # Merge machine-readable supersedes declarations into the same map: the
+    # field and prose channels coexist, and a cross-channel conflict is the
+    # same "two successors for one decision" defect the prose check already
+    # rejects. Dangling field targets were validated against the store in
+    # check_rationale_store.
+    for target, successors in sorted(result.supersedes_fields.items()):
+        for successor in successors:
+            existing = superseded.get(target)
+            if existing is not None and existing != successor:
+                result.errors.append(
+                    f"RATIONALE: decision {target} is superseded more than once "
+                    f"({existing}, {successor})"
+                )
+                continue
+            superseded[target] = successor
+    # Succession chains: a long replacement chain is the revision-churn smell
+    # the dogfooding audit surfaced (one decision rewritten repeatedly through
+    # short-lived successors). Warn at the chain root only.
+    values = set(superseded.values())
+    starts = [cid for cid in sorted(superseded) if cid not in values] or sorted(superseded)
+    visited: set[str] = set()
+    for start in starts:
+        if start in visited:
+            continue
+        chain = [start]
+        visited.add(start)
+        current = start
+        while True:
+            successor = superseded.get(current)
+            if successor is None:
+                break
+            if successor in visited and successor not in chain:
+                break
+            if successor in chain:
+                result.errors.append(
+                    f"{store_label}: supersession cycle involving {successor}"
+                )
+                break
+            chain.append(successor)
+            visited.add(successor)
+            current = successor
+        events = len(chain) - 1
+        if events >= SUPERSESSION_CHAIN_WARN:
+            result.warnings.append(
+                f"{store_label}: decision chain {' -> '.join(chain)} has {events} "
+                "successive replacements — high revision churn, consider a consolidation"
+            )
     result.superseded_decisions = superseded
 
     for rid in sorted(duplicate_ids(requirement_ids)):
@@ -1195,17 +1958,17 @@ def check_traceability(root: Path, result: Result) -> None:
     for ngid in sorted(duplicate_ids(non_goal_ids)):
         result.errors.append(f"PRD.md: duplicate non-goal id {ngid}")
     for cid in sorted(duplicate_ids(decision_ids)):
-        result.errors.append(f"RATIONALE.md: duplicate decision id {cid}")
+        result.errors.append(f"{store_label}: duplicate decision id {cid}")
     for cid in sorted(set(decision_ids) - old_decision_ids):
         if re.fullmatch(r"C-\d{3}[A-Z]", cid):
-            result.errors.append(f"RATIONALE.md: new decision id {cid} cannot use a legacy suffix")
+            result.errors.append(f"{store_label}: new decision id {cid} cannot use a legacy suffix")
     decision_order = []
     for cid in decision_ids:
         match = re.fullmatch(r"C-(\d{3})([A-Z]?)", cid)
         if match:
             decision_order.append((int(match.group(1)), match.group(2) or ""))
     if decision_order != sorted(decision_order):
-        result.errors.append("RATIONALE.md: decision ids are not in chronological order")
+        result.errors.append(f"{store_label}: decision ids are not in chronological order")
 
     modules = solution_modules(solution_plain)
     for module in modules:
@@ -1362,13 +2125,15 @@ def is_commit_evidence_repair(root: Path, old_text: str, new_text: str) -> bool:
 
 def git_ref_text(root: Path, ref: str, relative: Path) -> str | None:
     try:
-        return subprocess.run(
-            ["git", "show", f"{ref}:{relative.as_posix()}"],
-            cwd=root,
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout
+        return normalize_text(
+            subprocess.run(
+                ["git", "show", f"{ref}:{relative.as_posix()}"],
+                cwd=root,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout
+        )
     except (OSError, subprocess.CalledProcessError):
         return None
 
@@ -1378,14 +2143,26 @@ def git_head_text(root: Path, relative: Path) -> str | None:
 
 
 def resolves_to_reachable_commit(root: Path, value: str) -> bool:
-    resolved = subprocess.run(
-        ["git", "rev-parse", "--verify", f"{value}^{{commit}}"],
+    completed = subprocess.run(
+        ["git", "rev-parse", "--verify", "%s^{commit}" % value],
         cwd=root,
         check=False,
         capture_output=True,
         text=True,
     )
-    return bool(resolved.stdout.strip()) and is_ancestor(root, resolved.stdout.strip(), "HEAD")
+    if completed.returncode != 0:
+        stderr = completed.stderr.strip()
+        if "not a git repository" in stderr.lower():
+            # Infrastructure failure: the gate must abort, not read the
+            # evidence as invalid.
+            raise GitCommandError("git rev-parse --verify exited %d: %s" % (completed.returncode, stderr))
+        # Every other non-zero code (1 "Needed a single revision", 128 "bad
+        # object") is data semantics: the evidence hash does not resolve, and
+        # the caller records the unresolvable evidence as a lint error.
+        return False
+    if not completed.stdout.strip():
+        return False
+    return is_ancestor(root, completed.stdout.strip(), "HEAD")
 
 
 def git_merge_head(root: Path) -> str | None:
@@ -1436,9 +2213,9 @@ def commit_parents(root: Path, commit: str) -> list[str]:
 
 
 def adoption_commit(root: Path, tips: list[str]) -> str | None:
-    commits = subprocess.run(
+    commits = run_git(
+        root,
         [
-            "git",
             "log",
             "--reverse",
             "--diff-filter=A",
@@ -1447,24 +2224,27 @@ def adoption_commit(root: Path, tips: list[str]) -> str | None:
             "--",
             "tools/agentmap_lint.py",
         ],
-        cwd=root,
-        check=False,
-        capture_output=True,
-        text=True,
-    ).stdout.splitlines()
+    ).splitlines()
     return commits[0] if commits else None
 
 
 def is_ancestor(root: Path, ancestor: str, descendant: str) -> bool:
-    return (
-        subprocess.run(
-            ["git", "merge-base", "--is-ancestor", ancestor, descendant],
-            cwd=root,
-            check=False,
-            capture_output=True,
-        ).returncode
-        == 0
+    completed = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", ancestor, descendant],
+        cwd=root,
+        check=False,
+        capture_output=True,
+        text=True,
     )
+    if completed.returncode not in (0, 1):
+        # 1 is data semantics ("not an ancestor"); anything else is a broken
+        # repository and must abort instead of reading every commit as
+        # "outside the audit".
+        raise GitCommandError(
+            "git merge-base --is-ancestor exited %d: %s"
+            % (completed.returncode, completed.stderr.strip())
+        )
+    return completed.returncode == 0
 
 
 def outgoing_push_lines(root: Path, input_text: str, result: Result) -> list[list[str]]:
@@ -1502,28 +2282,38 @@ def outgoing_push_lines(root: Path, input_text: str, result: Result) -> list[lis
     return lines
 
 
-def ref_decision_entry(root: Path, ref: str) -> tuple[str, str] | None:
-    for name in APPEND_ONLY_FILES:
-        text = git_ref_text(root, ref, Path(name))
-        if text is not None:
-            return name, text
+def receipt_history_failure(root: Path, result: Result, parent: str, commit: str) -> str | None:
+    """Replay write-once semantics per outgoing commit: a receipt may only be
+    added. A later commit that modifies or removes it breaks the evidence
+    chain the same way editing a terminal task does."""
+    try:
+        statuses = run_git(
+            root,
+            ["diff", "--name-status", parent, commit, "--", RECEIPTS_DIR],
+            expected=(0,),
+        ).splitlines()
+    except GitCommandError as error:
+        git_data_error(result, "receipt history audit failed", error)
+        return None
+    for line in statuses:
+        parts = line.split("\t")
+        status = parts[0][:1]
+        if status in ("M", "D", "R"):
+            return f"receipt {parts[1]} was modified or removed ({status}) after being written"
     return None
 
 
 def check_history_transition(root: Path, result: Result, parent: str, commit: str, check_additions: bool) -> None:
-    old_entry = ref_decision_entry(root, parent)
-    new_entry = ref_decision_entry(root, commit)
-    if check_additions and old_entry and old_entry[1]:
-        old_name, old_text = old_entry
-        if new_entry is None:
-            result.errors.append(f"{commit[:12]}: {old_name} removed existing history")
+    old_store = ref_decision_store(root, parent)
+    new_store = ref_decision_store(root, commit)
+    if check_additions and old_store:
+        if not new_store:
+            result.errors.append(f"{commit[:12]}: decision store removed existing history")
         else:
-            failure = decision_transition_failure(decision_entries(old_text), decision_entries(new_entry[1]))
+            failure = decision_store_transition_failure(old_store, new_store)
             if failure:
-                result.errors.append(f"{commit[:12]}: {old_name} {failure}")
-    if check_additions and new_entry is not None:
-        old_ids = set(C_HEADING_RE.findall(decision_entries(old_entry[1]))) if old_entry else set()
-        for cid in set(C_HEADING_RE.findall(decision_entries(new_entry[1]))) - old_ids:
+                result.errors.append(f"{commit[:12]}: {failure}")
+        for cid in store_decision_ids(new_store) - store_decision_ids(old_store):
             if re.fullmatch(r"C-\d{3}[A-Z]", cid):
                 result.errors.append(f"{commit[:12]}: new decision id {cid} cannot use a legacy suffix")
 
@@ -1537,6 +2327,10 @@ def check_history_transition(root: Path, result: Result, parent: str, commit: st
         if is_commit_evidence_repair(root, old_text, new_tasks.get(path, "")):
             continue
         result.errors.append(f"{commit[:12]}: {path} changed after reaching a terminal state")
+
+    receipt_failure = receipt_history_failure(root, result, parent, commit)
+    if receipt_failure:
+        result.errors.append(f"{commit[:12]}: {receipt_failure}")
 
     if not check_additions:
         return
@@ -1556,7 +2350,11 @@ def check_outgoing_history(root: Path, result: Result, input_text: str) -> None:
     lines = outgoing_push_lines(root, input_text, result)
     total = sum(len(commits) for commits in lines)
     tips = [commits[-1] for commits in lines if commits]
-    baseline = adoption_commit(root, tips) if tips else None
+    try:
+        baseline = adoption_commit(root, tips) if tips else None
+    except GitCommandError as error:
+        result.errors.append(f"pre-push: adoption baseline lookup failed: {error}")
+        return
     baseline_seen = False
     for commits in lines:
         for commit in commits:
@@ -1580,27 +2378,16 @@ def check_outgoing_history(root: Path, result: Result, input_text: str) -> None:
         )
 
 
-def historical_task_ids(root: Path, merge_head: str | None = None) -> set[str]:
+def historical_task_ids(root: Path, result: Result, merge_head: str | None = None) -> set[str]:
     try:
         refs = ["HEAD", merge_head] if merge_head else ["HEAD"]
-        history_names = subprocess.run(
-            ["git", "log", *refs, "--format=", "--name-only", "--", "tasks"],
-            cwd=root,
-            check=False,
-            capture_output=True,
-            text=True,
-        ).stdout.splitlines()
-        current_names = subprocess.run(
-            ["git", "ls-tree", "-r", "--name-only", "HEAD", "--", "tasks"],
-            cwd=root,
-            check=False,
-            capture_output=True,
-            text=True,
-        ).stdout.splitlines()
-    except OSError:
+        history_names = run_git(root, ["log", *refs, "--format=", "--name-only", "--", "tasks"])
+        current_names = run_git(root, ["ls-tree", "-r", "--name-only", "HEAD", "--", "tasks"])
+    except GitCommandError as error:
+        git_data_error(result, "task-id history discovery failed", error)
         return set()
     task_ids = set()
-    for name in history_names + current_names:
+    for name in history_names.splitlines() + current_names.splitlines():
         match = TASK_NAME_RE.match(Path(name).name)
         if match:
             task_ids.add(match.group(1))
@@ -1658,7 +2445,13 @@ def code_review_start(root: Path, result: Result) -> int | None:
 
 
 def agentmap_spec_version(root: Path, result: Result) -> int:
-    """CONVENTIONS 登记的规范版本：1 = 全量矩阵与独立审核，2 = micro/standard/high 分级。"""
+    """CONVENTIONS 登记的规范版本：1 = 全量矩阵与独立审核，2 = micro/standard/high 分级，3 = +RATIONALE 目录化。
+
+    Result.spec_version 记录首读结果作为缓存，lint() 在 check_system_files
+    之前调用一次，后续调用方直接命中缓存。
+    """
+    if result.spec_version:
+        return result.spec_version
     path = root / "CONVENTIONS.md"
     if not path.is_file():
         return 1
@@ -1673,13 +2466,14 @@ def agentmap_spec_version(root: Path, result: Result) -> int:
     if match is None:
         result.warnings.append(
             "CONVENTIONS.md: missing agentmap 规范版本, linting with v1 rules; "
-            "bootstrap upgrade registers 规范版本: 2"
+            "bootstrap upgrade registers 规范版本: 3"
         )
         return 1
     version = int(match.group(1))
-    if version not in (1, 2):
-        result.errors.append("CONVENTIONS.md: agentmap 规范版本 must be 1 or 2")
+    if version not in (1, 2, 3):
+        result.errors.append("CONVENTIONS.md: agentmap 规范版本 must be 1, 2 or 3")
         return 1
+    result.spec_version = version
     return version
 
 
@@ -1791,14 +2585,18 @@ def check_verification_matrix(root: Path, result: Result, path: Path, text: str)
                 result.errors.append(f"{relative}: unsafe evidence path {file_name}")
                 continue
             target_path = root / target
-            if not target_path.is_file():
+            store_text = rationale_store_text(root) if file_name == "RATIONALE.md" else None
+            if not target_path.is_file() and store_text is None:
                 result.errors.append(f"{relative}: missing evidence file {file_name}")
                 continue
-            try:
-                target_text = target_path.read_text(encoding="utf-8")
-            except UnicodeDecodeError:
-                result.errors.append(f"{relative}: evidence file is not text {file_name}")
-                continue
+            if store_text is not None:
+                target_text = store_text
+            else:
+                try:
+                    target_text = target_path.read_text(encoding="utf-8")
+                except UnicodeDecodeError:
+                    result.errors.append(f"{relative}: evidence file is not text {file_name}")
+                    continue
             if not anchor or anchor not in target_text:
                 result.errors.append(f"{relative}: missing evidence anchor {reference}")
             if separator == "#":
@@ -1817,14 +2615,13 @@ def check_tasks(root: Path, result: Result, changed: set[str]) -> None:
         result.errors.append("missing: tasks/")
         return
     try:
-        tracked_lifecycle = subprocess.run(
-            ["git", "grep", "-l", r"^mutation: lifecycle$", "HEAD", "--", "tasks/*.md"],
-            cwd=root,
-            check=False,
-            capture_output=True,
-            text=True,
-        ).stdout.splitlines()
-    except OSError:
+        tracked_lifecycle = run_git(
+            root,
+            ["grep", "-l", r"^mutation: lifecycle$", "HEAD", "--", "tasks/*.md"],
+            expected=(0, 1),
+        ).splitlines()
+    except GitCommandError as error:
+        git_data_error(result, "terminal-task discovery failed", error)
         tracked_lifecycle = []
     merge_head = git_merge_head(root)
     for entry in tracked_lifecycle:
@@ -1833,38 +2630,53 @@ def check_tasks(root: Path, result: Result, changed: set[str]) -> None:
         if old and task_state(old) in TERMINAL_STATES and not (root / relative).is_file():
             result.errors.append(f"{relative}: terminal task was deleted or moved")
     counts = {"active": 0, "completed": 0, "abandoned": 0, "superseded": 0}
-    historical_ids = historical_task_ids(root, merge_head)
+    historical_ids = historical_task_ids(root, result, merge_head)
     new_task_ids: list[str] = []
     task_ids: list[str] = []
     states: dict[str, str] = {}
     matrix_start = verification_matrix_start(root, result)
     review_start = code_review_start(root, result)
     spec_version = agentmap_spec_version(root, result)
-    for path in sorted(tasks_dir.glob("*.md")):
+    for path in sorted(tasks_dir.rglob("*.md")):
         name_match = TASK_NAME_RE.match(path.name)
         relative = path.relative_to(root)
+        task_label = relative.as_posix()
         old = git_head_text(root, relative)
         if old is None and merge_head:
             old = git_ref_text(root, merge_head, relative)
         if not name_match and not (LEGACY_TASK_NAME_RE.match(path.name) and old is not None):
             result.errors.append(
-                f"tasks/{path.name}: bad name, expect T-nnn-YYYYMMDD-slug.md"
+                f"{task_label}: bad name, expect T-nnn-slug.md"
             )
         elif (
             not name_match
             and legacy_deadline_passed(result)
         ):
             result.errors.append(
-                f"tasks/{path.name}: legacy task name outlived the legacy 迁移截止 "
-                f"({result.legacy_cutoff.isoformat()}); rename to T-nnn-YYYYMMDD-slug.md"
+                f"{task_label}: legacy task name outlived the legacy 迁移截止 "
+                f"({result.legacy_cutoff.isoformat()}); rename to T-nnn-slug.md"
             )
-        text = read_text_checked(path, result, f"tasks/{path.name}")
+        elif (
+            name_match
+            and path.parent == tasks_dir
+            and old is None
+            and DATED_TASK_NAME_RE.match(path.name)
+        ):
+            # Untracked task still carrying the retired dated shape: dateless
+            # is canonical, tracked dated names are grandfathered, so only
+            # reject new (untracked) ones. Subdirectories (e.g. tasks/archive/)
+            # are exempt — moving an existing task must not force a rename.
+            result.errors.append(
+                f"{task_label}: bad name, new tasks must not embed a date; "
+                "expect T-nnn-slug.md (dated names stay valid for already tracked tasks)"
+            )
+        text = read_text_checked(path, result, f"{task_label}")
         if text is None:
             continue
         current_state = task_state(text)
         fm = parse_frontmatter(text)
         if fm is None or fm.get("doc-type") != "task":
-            result.errors.append(f"tasks/{path.name}: doc-type should be task")
+            result.errors.append(f"{task_label}: doc-type should be task")
             continue
         require_review = False
         require_review_labels = False
@@ -1877,7 +2689,7 @@ def check_tasks(root: Path, result: Result, changed: set[str]) -> None:
         risk_level = "standard"
         if name_match and fm.get("id") != name_match.group(1):
             result.errors.append(
-                f"tasks/{path.name}: id should be {name_match.group(1)}, got {fm.get('id')}"
+                f"{task_label}: id should be {name_match.group(1)}, got {fm.get('id')}"
             )
         if name_match:
             task_id = name_match.group(1)
@@ -1887,6 +2699,12 @@ def check_tasks(root: Path, result: Result, changed: set[str]) -> None:
             allowed_risk = "micro|standard|high" if spec_version >= 2 else "standard|high"
             risk = re.findall(rf"^风险等级:\s*({allowed_risk})\s*$", text, re.MULTILINE)
             risk_level = risk[0] if len(risk) == 1 else "standard"
+            # The declared tier is self-reported, so --report publishes the
+            # distribution as the spot-check handle: an implausible cluster of
+            # micro tasks is the signal to sample tasks for 矩阵/自查 compliance.
+            result.risk_counts[risk[0] if len(risk) == 1 else "未标注"] = (
+                result.risk_counts.get(risk[0] if len(risk) == 1 else "未标注", 0) + 1
+            )
             require_matrix = within_scope
             require_review = review_start is not None and int(task_id[2:]) >= review_start
             if spec_version >= 2:
@@ -1899,7 +2717,7 @@ def check_tasks(root: Path, result: Result, changed: set[str]) -> None:
                     and not (old is not None and task_state(old) in TERMINAL_STATES)
                 ):
                     result.errors.append(
-                        f"tasks/{path.name}: needs exactly one 风险等级: micro, standard or high"
+                        f"{task_label}: needs exactly one 风险等级: micro, standard or high"
                     )
                 require_matrix = within_scope and risk_level != "micro"
                 require_review = require_review and risk_level in ("standard", "high")
@@ -1908,33 +2726,33 @@ def check_tasks(root: Path, result: Result, changed: set[str]) -> None:
             else:
                 require_review_labels = require_review
                 if require_review and len(risk) != 1:
-                    result.errors.append(f"tasks/{path.name}: needs exactly one 风险等级: standard or high")
+                    result.errors.append(f"{task_label}: needs exactly one 风险等级: standard or high")
             check_task_sections(root, result, path, text, require_matrix, risk_level)
             if old is None:
                 new_task_ids.append(task_id)
             if require_matrix and current_state not in TERMINAL_STATES:
                 check_verification_matrix(root, result, path, text)
         if fm.get("mutation") != "lifecycle":
-            result.errors.append(f"tasks/{path.name}: mutation should be lifecycle")
+            result.errors.append(f"{task_label}: mutation should be lifecycle")
         state = current_state
         if state is None:
-            result.errors.append(f"tasks/{path.name}: missing valid 状态")
+            result.errors.append(f"{task_label}: missing valid 状态")
             continue
         counts[state] += 1
         if state == "active":
             for rid in sorted(set(LEGACY_R_ID_RE.findall(text))):
                 result.errors.append(
-                    f"tasks/{path.name}: active task legacy requirement reference {rid} must migrate to R-gg-nnn"
+                    f"{task_label}: active task legacy requirement reference {rid} must migrate to R-gg-nnn"
                 )
         if not (old and task_state(old) in TERMINAL_STATES):
             for cid in sorted(set(C_ID_RE.findall(strip_code_fences(text))) - result.decision_ids):
-                result.errors.append(f"tasks/{path.name}: references missing decision {cid}")
+                result.errors.append(f"{task_label}: references missing decision {cid}")
         if name_match:
             states[name_match.group(1)] = state
         if state in TERMINAL_STATES:
             terminal = re.search(r"^## 终态与证据\s*$([\s\S]*)", text, re.MULTILINE)
             if not terminal or not terminal.group(1).strip():
-                result.errors.append(f"tasks/{path.name}: terminal task needs 终态与证据")
+                result.errors.append(f"{task_label}: terminal task needs 终态与证据")
             elif state == "completed":
                 evidence = terminal.group(1)
                 labels = ["实现", "测试", "commit"]
@@ -1947,7 +2765,22 @@ def check_tasks(root: Path, result: Result, changed: set[str]) -> None:
                 for label in labels:
                     if not re.search(rf"^-\s*{label}:\s*\S", evidence, re.MULTILINE):
                         result.errors.append(
-                            f"tasks/{path.name}: completed task needs {label} evidence"
+                            f"{task_label}: completed task needs {label} evidence"
+                        )
+                if name_match and RECEIPT_DECLARE_RE.search(text):
+                    # 引用必须落到真实文件:幻影路径同样让实证验收闭环失效
+                    receipt_ref = re.search(
+                        rf"(receipts/{re.escape(name_match.group(1))}-\S+?\.md)", text
+                    )
+                    if receipt_ref is None:
+                        result.errors.append(
+                            f"{task_label}: 实证验收 task needs a "
+                            f"receipts/{name_match.group(1)}-<slug>.md run receipt"
+                        )
+                    elif not (root / receipt_ref.group(1)).is_file():
+                        result.errors.append(
+                            f"{task_label}: receipt reference {receipt_ref.group(1)} "
+                            "does not exist"
                         )
                 # hash 提取用 hex 字符类而非 \S+：全角括号紧跟 hash（「54f4309（说明）」）
                 # 会被 \S+ 整体吞掉再被 fullmatch 拒绝，误伤合法格式
@@ -1959,21 +2792,18 @@ def check_tasks(root: Path, result: Result, changed: set[str]) -> None:
                     hash_match = re.match(r"[0-9a-f]{7,40}\b", evidence_line)
                     if hash_match is None:
                         result.errors.append(
-                            f"tasks/{path.name}: commit evidence line is not a commit"
+                            f"{task_label}: commit evidence line is not a commit"
                             f" hash: {evidence_line}"
                         )
                     elif not resolves_to_reachable_commit(root, hash_match.group(0)):
                         result.errors.append(
-                            f"tasks/{path.name}: commit evidence must resolve to a reachable commit"
+                            f"{task_label}: commit evidence must resolve to a reachable commit"
                         )
-                # 终态任务不回改：HEAD 时已是终态的 task 属于历史记录，
-                # 不得被后续新增的审核规则倒查（与下面两个分支的豁免口径一致）。
-                grandfathered = old is not None and task_state(old) in TERMINAL_STATES
-                if require_review and not grandfathered and not re.search(
+                if require_review and not re.search(
                     r"^-[ \t]*review:[ \t]*(?:\S.*)?$", evidence, re.MULTILINE
                 ):
                     result.errors.append(
-                        f"tasks/{path.name}: completed task needs independent code review evidence"
+                        f"{task_label}: completed task needs independent code review evidence"
                     )
                 elif require_review_labels and (old is None or task_state(old) not in TERMINAL_STATES):
                     check_review_evidence(root, result, path, evidence)
@@ -1988,17 +2818,17 @@ def check_tasks(root: Path, result: Result, changed: set[str]) -> None:
                     )
                     if len(items) < 3:
                         result.errors.append(
-                            f"tasks/{path.name}: completed standard task needs 自查清单"
+                            f"{task_label}: completed standard task needs 自查清单"
                             " with at least three items"
                         )
             elif state == "abandoned" and not re.search(
                 r"^-\s*原因:\s*\S", terminal.group(1), re.MULTILINE
             ):
-                result.errors.append(f"tasks/{path.name}: abandoned task needs 原因")
+                result.errors.append(f"{task_label}: abandoned task needs 原因")
             elif state == "superseded" and not re.search(
                 r"^-\s*后继:\s*\S", terminal.group(1), re.MULTILINE
             ):
-                result.errors.append(f"tasks/{path.name}: superseded task needs 后继")
+                result.errors.append(f"{task_label}: superseded task needs 后继")
         changed_old = old if relative.as_posix() in changed else None
         if changed_old and parse_frontmatter_text(changed_old).get("mutation") == "lifecycle":
             old_state = task_state(changed_old)
@@ -2007,7 +2837,7 @@ def check_tasks(root: Path, result: Result, changed: set[str]) -> None:
                 and changed_old != text
                 and not is_commit_evidence_repair(root, changed_old, text)
             ):
-                result.errors.append(f"tasks/{path.name}: terminal task is immutable")
+                result.errors.append(f"{task_label}: terminal task is immutable")
     for task_id in sorted(duplicate_ids(task_ids)):
         result.errors.append(f"tasks/: duplicate task id {task_id}")
     for task_id in sorted(set(new_task_ids) & historical_ids):
@@ -2169,7 +2999,7 @@ def check_code_anchors(root: Path, result: Result, enabled: bool) -> None:
     """
     if not enabled:
         return
-    task_ids = historical_task_ids(root)
+    task_ids = historical_task_ids(root, result)
     patterns = test_anchor_patterns(root, result)
     anchor_re = re.compile(r"AgentMap:\s*(.*)$", re.MULTILINE)
     for relative in tracked_candidates(root):
@@ -2240,9 +3070,6 @@ def is_executable_path(root: Path, path: Path) -> bool:
 
 
 def check_hooks(root: Path, result: Result) -> None:
-    # 门禁形态由项目自行决定：可以挂全套 git hook，也可以完全手动。
-    # 因此 hook 缺席、注册表不一致都只是告警（提醒事实已变），不阻断 lint；
-    # 只有「hook 存在但结构不合约定」才保持错误级（那才是真正的配置损坏）。
     for relative in (
         Path(".githooks/commit-msg"),
         Path(".githooks/pre-commit"),
@@ -2252,7 +3079,7 @@ def check_hooks(root: Path, result: Result) -> None:
     ):
         path = root / relative
         if not path.is_file():
-            result.warnings.append(f"no git hook installed: {relative}（当前为手动验证模式）")
+            result.errors.append(f"missing: {relative}")
         elif not is_executable_path(root, path):
             result.errors.append(f"{relative}: must be executable")
     for name in ("commit-msg", "pre-commit", "pre-push"):
@@ -2291,18 +3118,14 @@ def check_hooks(root: Path, result: Result) -> None:
         text = read_text_checked(conventions, result, "CONVENTIONS.md")
         if text is None:
             return
-        # 权威验证入口允许显式声明为「手动」：本项目可以完全不挂 git hook，
-        # 由人决定何时跑测试；只有声明为仓库文件时才校验它真实存在且可执行。
-        authority = re.findall(r"^-\s*权威验证入口:\s*(.+?)\s*$", text, re.MULTILINE)
+        authority = re.findall(r"^-\s*权威验证入口:\s*(\S+)\s*$", text, re.MULTILINE)
         if len(authority) != 1:
             result.errors.append("CONVENTIONS.md: missing 权威验证入口")
-        elif authority[0].strip() in MANUAL_GATE_VALUES:
-            pass
         else:
-            target = Path(authority[0].strip())
+            target = Path(authority[0])
             if target.is_absolute() or ".." in target.parts or not (root / target).is_file():
                 result.errors.append(
-                    "CONVENTIONS.md: 权威验证入口 must be an existing repository file or 手动"
+                    "CONVENTIONS.md: 权威验证入口 must be an existing repository file"
                 )
             elif not is_executable_path(root, root / target):
                 result.errors.append("CONVENTIONS.md: 权威验证入口 must be executable")
@@ -2329,9 +3152,9 @@ def check_hooks(root: Path, result: Result) -> None:
             missing = sorted(actual - registered)
             stale = sorted(registered - actual)
             if missing:
-                result.warnings.append(f"CONVENTIONS.md: unregistered gate scripts: {', '.join(missing)}")
+                result.errors.append(f"CONVENTIONS.md: unregistered gate scripts: {', '.join(missing)}")
             if stale:
-                result.warnings.append(f"CONVENTIONS.md: missing registered gate scripts: {', '.join(stale)}")
+                result.errors.append(f"CONVENTIONS.md: missing registered gate scripts: {', '.join(stale)}")
         sources = (
             re.findall(
                 r"`([^`]+)`",
@@ -2343,10 +3166,10 @@ def check_hooks(root: Path, result: Result) -> None:
             else []
         )
         if not sources:
-            result.warnings.append("CONVENTIONS.md: 验证门禁 needs 扫描来源")
+            result.errors.append("CONVENTIONS.md: 验证门禁 needs 扫描来源")
         for source in sources:
             if not (root / source).exists():
-                result.warnings.append(f"CONVENTIONS.md: missing validation scan source {source}")
+                result.errors.append(f"CONVENTIONS.md: missing validation scan source {source}")
 
 
 def check_runtime_contract(root: Path, result: Result) -> None:
@@ -2390,15 +3213,19 @@ def strict_test_anchors(root: Path, result: Result, forced: bool) -> bool:
 
 def lint(root: Path, strict_tests: bool = False) -> Result:
     result = Result()
-    changed = git_changed_paths(root)
+    changed = git_changed_paths(root, result)
     result.legacy_cutoff = legacy_cutoff(root, result)
+    agentmap_spec_version(root, result)
     check_system_files(root, result, changed)
     check_todo_entries(root, result)
     check_id_formats(root, result)
-    check_writing_style(root, result, changed)
+    if not writing_style_disabled(root):
+        check_writing_style(root, result, changed)
+    check_revision_discipline(root, result, changed)
     check_traceability(root, result)
     check_core_document_budget(root, result)
     check_tasks(root, result, changed)
+    check_receipts(root, result, changed)
     check_test_anchors(root, result, strict_test_anchors(root, result, strict_tests))
     check_code_anchors(root, result, code_anchors_enabled(root, result))
     check_hooks(root, result)
@@ -2425,6 +3252,15 @@ def print_result(result: Result, report: bool) -> None:
                 "AgentMap task 文书行数: "
                 f"{counts} (total={sum(result.task_line_counts.values())})"
             )
+        if result.risk_counts:
+            distribution = ", ".join(
+                f"{tier}={count}" for tier, count in sorted(result.risk_counts.items())
+            )
+            print(
+                "AgentMap 风险分布: "
+                f"{distribution} (共 {sum(result.risk_counts.values())} task；"
+                "等级为风险自评，micro 免验证矩阵，此分布是抽查抓手)"
+            )
     if result.warnings:
         print("agentmap lint warnings:")
         for warning in result.warnings:
@@ -2434,7 +3270,7 @@ def print_result(result: Result, report: bool) -> None:
         for error in result.errors:
             print(f"  - {error}")
     else:
-        print("agentmap lint passed")
+        print("agentmap lint passed" + (" (with warnings)" if result.warnings else ""))
 
 
 def write_fixture(root: Path) -> None:
@@ -2976,10 +3812,10 @@ def self_test_state_scope_and_evidence() -> None:
         # 状态劫持防线：正文节内的「状态: completed」行只是引用文字，任务
         # 仍以标题块的 active 为准；若全文搜索回归，此处会按 completed
         # 追加实现/测试等证据缺失错误。
-        task.write_text(active_text + "状态: completed\n", encoding="utf-8")
+        task.write_text(active_text + "状态: completed\n")
         hijacked = lint(root, strict_tests=True)
         assert not hijacked.errors, hijacked.errors
-        task.write_text(active_text, encoding="utf-8")
+        task.write_text(active_text)
 
         # 终态证据占位防线：`- commit: 待补` 满足标签存在性检查，但值不是
         # hash，不得当作已满足 commit 证据蒙混过关。
@@ -2995,7 +3831,7 @@ def self_test_state_scope_and_evidence() -> None:
   - 复审结论: pass
 - commit: 待补
 """
-        task.write_text(placeholder_text, encoding="utf-8")
+        task.write_text(placeholder_text)
         flagged = lint(root, strict_tests=True)
         assert any(
             "commit evidence line is not a commit hash: 待补" in error for error in flagged.errors
@@ -3005,7 +3841,7 @@ def self_test_state_scope_and_evidence() -> None:
             for error in flagged.errors
         ), flagged.errors
 
-        task.write_text(placeholder_text.replace("- commit: 待补", f"- commit: {initial}"), encoding="utf-8")
+        task.write_text(placeholder_text.replace("- commit: 待补", f"- commit: {initial}"))
         resolved = lint(root, strict_tests=True)
         assert not resolved.errors, resolved.errors
 
@@ -3061,29 +3897,29 @@ def self_test_document_budget_and_decisions() -> None:
         solution = root / "SOLUTION.md"
         solution_original = solution.read_text(encoding="utf-8")
 
-        conventions.write_text(conventions_original.replace("- 核心文档上限: 20000 token\n", ""), encoding="utf-8")
+        conventions.write_text(conventions_original.replace("- 核心文档上限: 20000 token\n", ""))
         unregistered = lint(root, strict_tests=True)
         assert any("核心文档上限 not registered" in warning for warning in unregistered.warnings)
-        conventions.write_text(conventions_original, encoding="utf-8")
+        conventions.write_text(conventions_original)
 
-        solution.write_text(solution_original + "\n" + "x" * 70000 + "\n", encoding="utf-8")
+        solution.write_text(solution_original + "\n" + "x" * 70000 + "\n")
         over_limit = lint(root, strict_tests=True)
         assert any("over the registered limit" in error for error in over_limit.errors), over_limit.errors
-        conventions.write_text(conventions_original + "- 核心文档分片方案: SOLUTION.md 拆分见 tasks/\n", encoding="utf-8")
+        conventions.write_text(conventions_original + "- 核心文档分片方案: SOLUTION.md 拆分见 tasks/\n")
         planned = lint(root, strict_tests=True)
         assert any("over the registered limit" in warning for warning in planned.warnings)
         assert not any("over the registered limit" in error for error in planned.errors)
-        solution.write_text(solution_original, encoding="utf-8")
-        conventions.write_text(conventions_original, encoding="utf-8")
+        solution.write_text(solution_original)
+        conventions.write_text(conventions_original)
 
         solution_line = "核对日期: 2026-08-01\n"
-        solution.write_text(solution_original.replace(solution_line, ""), encoding="utf-8")
+        solution.write_text(solution_original.replace(solution_line, ""))
         unverified = lint(root, strict_tests=True)
         assert any("lacks 核对日期" in warning for warning in unverified.warnings)
-        solution.write_text(solution_original.replace(solution_line, "核对日期: 2026/08/01\n"), encoding="utf-8")
+        solution.write_text(solution_original.replace(solution_line, "核对日期: 2026/08/01\n"))
         malformed = lint(root, strict_tests=True)
         assert any("核对日期 must be YYYY-MM-DD" in error for error in malformed.errors)
-        solution.write_text(solution_original, encoding="utf-8")
+        solution.write_text(solution_original)
 
         rationale = root / "RATIONALE.md"
         rationale_original = rationale.read_text(encoding="utf-8")
@@ -3093,22 +3929,22 @@ def self_test_document_budget_and_decisions() -> None:
             "\n### C-002 改用嵌入式存储\n日期: 2026-08-02\n\n#### 上下文\n并发写入受损。\n"
             "#### 决策\n改用嵌入式存储。\n- 废弃: C-001\n#### 被否方案及原因\n维持单文件会继续损坏。\n#### 影响面\n文档服务\n"
         )
-        rationale.write_text(rationale_original + entries, encoding="utf-8")
+        rationale.write_text(rationale_original + entries)
         clean = lint(root, strict_tests=True)
         assert not any("superseded" in error for error in clean.errors), clean.errors
         prd = root / "PRD.md"
         prd_original = prd.read_text(encoding="utf-8")
-        prd.write_text(prd_original.replace("- 关联方案: Search", "- 关联方案: Search\n- 出处: C-001"), encoding="utf-8")
+        prd.write_text(prd_original.replace("- 关联方案: Search", "- 关联方案: Search\n- 出处: C-001"))
         stale = lint(root, strict_tests=True)
         assert any(
             "references superseded decision C-001 superseded by C-002" in error for error in stale.errors
         ), stale.errors
-        prd.write_text(prd_original, encoding="utf-8")
+        prd.write_text(prd_original)
 
-        rationale.write_text(rationale_original + entries.replace("- 废弃: C-001", "- 废弃: C-999"), encoding="utf-8")
+        rationale.write_text(rationale_original + entries.replace("- 废弃: C-001", "- 废弃: C-999"))
         dangling = lint(root, strict_tests=True)
         assert any("superseded decision C-999 does not exist" in error for error in dangling.errors)
-        rationale.write_text(rationale_original, encoding="utf-8")
+        rationale.write_text(rationale_original)
 
 
 def self_test_legacy_cutoff() -> None:
@@ -3396,13 +4232,13 @@ def self_test() -> None:
         assert any("id should be T-001" in error for error in mismatched_task_id.errors)
         task.write_text(active_text, encoding="utf-8")
 
-        duplicate_task = root / "tasks/T-001-20260802-other.md"
+        duplicate_task = root / "tasks/T-001-other.md"
         duplicate_task.write_text(active_text.replace("# Search", "# Other"), encoding="utf-8")
         duplicate_task_id = lint(root, strict_tests=True)
         assert any("duplicate task id T-001" in error for error in duplicate_task_id.errors)
         duplicate_task.unlink()
 
-        skipped_task = root / "tasks/T-003-20260802-skipped.md"
+        skipped_task = root / "tasks/T-003-skipped.md"
         skipped_task.write_text(
             active_text.replace("id: T-001", "id: T-003").replace("# Search", "# Skipped"),
             encoding="utf-8",
@@ -3412,7 +4248,7 @@ def self_test() -> None:
         skipped_task.unlink()
 
         task.unlink()
-        reused_task = root / "tasks/T-001-20260802-reused.md"
+        reused_task = root / "tasks/T-001-reused.md"
         reused_task.write_text(active_text.replace("# Search", "# Reused"), encoding="utf-8")
         reused_task_id = lint(root, strict_tests=True)
         assert any("reused task id T-001" in error for error in reused_task_id.errors)
@@ -3425,8 +4261,22 @@ def self_test() -> None:
             encoding="utf-8",
         )
         invalid_legacy = lint(root, strict_tests=True)
-        assert any("expect T-nnn-YYYYMMDD-slug.md" in error for error in invalid_legacy.errors)
+        assert any("expect T-nnn-slug.md" in error for error in invalid_legacy.errors)
         new_legacy.unlink()
+
+        # 新 task 不得沿用带日期段命名；已跟踪的带日期名（如 fixture 的
+        # T-001-20260801-search.md）保持合法——该豁免由 self_test_risk_tiers
+        # 与外部 make_fixture 的 clean 断言共同回归。
+        new_dated = root / "tasks/T-002-20260801-dated.md"
+        new_dated.write_text(
+            active_text.replace("id: T-001", "id: T-002").replace("# Search", "# Dated"),
+            encoding="utf-8",
+        )
+        dated_new = lint(root, strict_tests=True)
+        assert any(
+            "new tasks must not embed a date" in error for error in dated_new.errors
+        ), dated_new.errors
+        new_dated.unlink()
 
         matrix_row = "| 异常 | 适用：搜索异常 | `tests/test_search.py::test_search` |\n"
         task.write_text(active_text.replace(matrix_row, ""), encoding="utf-8")
@@ -3603,7 +4453,7 @@ def self_test() -> None:
         assert any(
             "created directly in a terminal state" in error for error in rename_history.errors
         )
-        assert "T-002" in historical_task_ids(root)
+        assert "T-002" in historical_task_ids(root, rename_history)
     self_test_id_formats()
     self_test_state_scope_and_evidence()
     self_test_io_errors()
@@ -3615,13 +4465,503 @@ def self_test() -> None:
     print("agentmap lint self-test passed")
 
 
+def absolutize_inherited_git_env() -> None:
+    """Pin inherited relative git env vars to absolute paths before cwd changes.
+
+    `git commit` exports GIT_INDEX_FILE to the pre-commit hook as a path
+    relative to the repository root. The --staged flow later re-points the
+    scan root at a snapshot directory whose .git is a gitdir pointer file,
+    so a relative ".git/index" then resolves through a file component and
+    every discovery command dies with ENOTDIR. Resolving against the entry
+    cwd (where git resolved it for the hook) keeps both the normal and the
+    partial-commit temporary index faithful.
+    """
+    index_env = os.environ.get("GIT_INDEX_FILE")
+    if index_env and not os.path.isabs(index_env):
+        os.environ["GIT_INDEX_FILE"] = str(Path.cwd() / index_env)
+
+
+DOCTOR_WINDOW = 20
+DOCTOR_APPENDITIVITY_RATIO = 5
+DOCTOR_APPENDITIVITY_MIN_ADDED = 20
+
+
+def doctor_creation_commit(root: Path, name: str) -> str | None:
+    """Hash of the commit that first added the file (oldest --diff-filter=A hit)."""
+    out = run_git(root, ["log", "--diff-filter=A", "--format=%H", "--", name])
+    hashes = [line.strip() for line in out.splitlines() if line.strip()]
+    return hashes[-1] if hashes else None
+
+
+def doctor_appenditivity(root: Path, name: str, window: int) -> tuple[int, int, int] | None:
+    """(non-creation touching commits, added, deleted) over the last window.
+
+    Excludes the creation commit because a document's birth commit is all
+    additions by definition; counting it would fake an append-heavy profile
+    for every freshly adopted repository. Binary rows ("-") count as zero.
+    """
+    creation = doctor_creation_commit(root, name)
+    out = run_git(root, ["log", "--numstat", "--format=%H", f"-{window}", "--", name])
+    commits = 0
+    added = 0
+    deleted = 0
+    current_hash: str | None = None
+    for line in out.splitlines():
+        if not line.strip():
+            continue
+        if "\t" not in line:
+            current_hash = line.strip()
+            continue
+        parts = line.split("\t")
+        if len(parts) < 3 or parts[2] != name or current_hash is None:
+            continue
+        if current_hash == creation:
+            current_hash = None
+            continue
+        commits += 1
+        if parts[0] != "-":
+            added += int(parts[0])
+        if parts[1] != "-":
+            deleted += int(parts[1])
+        current_hash = None
+    if commits == 0:
+        return None
+    return commits, added, deleted
+
+
+def doctor_budget_outlook(
+    root: Path,
+    histories: dict[str, tuple[int, int, int] | None],
+    window: int,
+) -> str:
+    """A2: core-document budget usage plus a touchdown extrapolation.
+
+    Line deltas from numstat are converted with each file's current average
+    bytes per line; the result is an honest approximation, not a forecast.
+    """
+    try:
+        text = (root / "CONVENTIONS.md").read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as error:
+        return f"CONVENTIONS.md 无法读取({error.__class__.__name__}),预算体检跳过"
+    match = CORE_BUDGET_RE.search(text)
+    if not match:
+        return "CONVENTIONS.md 未登记 核心文档上限,预算体检跳过"
+    registered = int(match.group(1))
+    limit = registered * CORE_BUDGET_BYTES_PER_TOKEN if match.group(2) == "token" else registered
+    total = 0
+    byte_delta = 0.0
+    measured = False
+    for name in CORE_BUDGET_FILES:
+        path = root / name
+        try:
+            if not path.is_file():
+                continue
+            body = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        size = len(body.encode("utf-8"))
+        line_count = body.count("\n") + (1 if body and not body.endswith("\n") else 0)
+        total += size
+        measured = True
+        history = histories.get(name)
+        if history is None or line_count == 0:
+            continue
+        net_lines = history[1] - history[2]
+        byte_delta += net_lines * (size / line_count)
+    if not measured:
+        return "核心文档均不存在,预算体检跳过"
+    usage = f"核心文档合计 {total:,}/{limit:,} 字节({total * 100 // limit if limit else 0}%)"
+    if total > limit:
+        usage += f",已超限 {total - limit:,} 字节"
+        return usage
+    if byte_delta <= 0:
+        history_any = any(history is not None for history in histories.values())
+        if history_any:
+            return f"{usage};近期净增持平或为负,无触顶风险"
+        return f"{usage};提交历史不足,无增速外推"
+    per_commit = byte_delta / window
+    eta = int((limit - total) / per_commit)
+    return (
+        f"{usage};近 {window} 次提交净增约 +{byte_delta:,.0f} 字节"
+        f"(≈{per_commit:,.0f} 字节/次),预计约 {eta} 次提交触顶"
+    )
+
+
+DOCTOR_WINDOW_RE = re.compile(r"^- 文档体检窗口:\s*(\d+)\s*次?$", re.MULTILINE)
+
+
+def doctor_window(root: Path) -> int:
+    """A1/A2 lookback window, overridable per repository via CONVENTIONS.
+
+    The default window of 20 commits saturates in high-velocity repositories
+    (every core document reads "touched 20 times", drowning the ratio), so a
+    repo may register a wider observation window with
+    `- 文档体检窗口: <N>` in its CONVENTIONS.md user region.
+    """
+    try:
+        text = (root / "CONVENTIONS.md").read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return DOCTOR_WINDOW
+    match = DOCTOR_WINDOW_RE.search(text)
+    if not match:
+        return DOCTOR_WINDOW
+    return max(1, int(match.group(1)))
+
+
+DOCTOR_DUPLICATE_THRESHOLD = 0.6
+DOCTOR_DUPLICATE_LIMIT = 5
+DOCTOR_MIN_UNIT_CHARS = 15
+AGENTMAP_BLOCK_BEGIN = "<!-- BEGIN AGENTMAP COMMIT CONVENTION -->"
+AGENTMAP_BLOCK_END = "<!-- END AGENTMAP COMMIT CONVENTION -->"
+
+
+def doctor_units(text: str, label: str) -> list[tuple[str, int, frozenset, str]]:
+    """Paragraph-level prose units of a document for A3 duplicate screening.
+
+    Frontmatter, fenced code, table rows, and headings are excluded — they
+    repeat by design (structure, not prose). Each unit carries its starting
+    line number so candidates can be located without re-deriving offsets, and
+    a 5-gram shingle set over CJK/latin characters only.
+    """
+    match = re.match(r"^---\n.*?\n---\n", text, re.DOTALL)
+    offset = 1
+    if match:
+        text = text[match.end():]
+        offset += match.group(0).count("\n")
+    units: list[tuple[str, int, frozenset, str]] = []
+    buffer: list[tuple[int, str]] = []
+    inside_fence = False
+    for number, line in enumerate(text.splitlines(), offset):
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            inside_fence = not inside_fence
+            if buffer:
+                units.extend(_flush_doctor_buffer(buffer, label))
+                buffer = []
+            continue
+        if (
+            inside_fence
+            or not stripped
+            or stripped.startswith("|")
+            or re.match(r"^#{1,6}\s", stripped)
+        ):
+            if buffer:
+                units.extend(_flush_doctor_buffer(buffer, label))
+                buffer = []
+            continue
+        buffer.append((number, stripped))
+    units.extend(_flush_doctor_buffer(buffer, label))
+    return units
+
+
+def _flush_doctor_buffer(
+    buffer: list[tuple[int, str]],
+    label: str,
+) -> list[tuple[str, int, frozenset, str]]:
+    """Pack buffered consecutive prose lines into one shingled unit."""
+    if not buffer:
+        return []
+    joined = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "", "".join(item[1] for item in buffer))
+    if len(joined) < DOCTOR_MIN_UNIT_CHARS:
+        return []
+    shingles = frozenset(joined[index:index + 5] for index in range(len(joined) - 4))
+    return [(label, buffer[0][0], shingles, buffer[0][1])]
+
+
+def doctor_managed_lines(text: str) -> frozenset[int]:
+    """Line numbers inside an `AGENTMAP COMMIT CONVENTION` managed region.
+
+    The framework keeps that block canonical: repositories cannot reword it
+    (bootstrap overwrites the block on upgrade), so overlap between two lines
+    that both live inside managed regions is scaffold self-similarity, not
+    document decay. A3 therefore drops such pairs while keeping any pair with
+    at least one repo-owned side — real cross-document duplication (a PRD
+    restating a CONVENTIONS registration verbatim) still surfaces.
+    """
+    managed: set[int] = set()
+    inside = False
+    for number, line in enumerate(text.splitlines(), 1):
+        if AGENTMAP_BLOCK_BEGIN in line or AGENTMAP_BLOCK_END in line:
+            # The marker lines themselves are framework text too: a bare
+            # marker's few shingles are easily subsumed by the adjacent
+            # managed block, which is exactly the self-noise pair.
+            inside = AGENTMAP_BLOCK_BEGIN in line
+            managed.add(number)
+            continue
+        if inside:
+            managed.add(number)
+    return frozenset(managed)
+
+
+def doctor_duplicate_candidates(root: Path) -> list[str]:
+    """A3: strongest paragraph-overlap pairs across the living core documents.
+
+    RATIONALE entries are deliberately excluded: supersede chains restate the
+    predecessor's decision text by design, so archive-internal overlap is the
+    mechanism working, not decay. Results are capped and come with line
+    numbers for a human to judge — this signal never gates.
+    """
+    units: list[tuple[str, int, frozenset, str]] = []
+    managed: dict[str, frozenset[int]] = {}
+    for name in DOCTOR_LIVING_DOCS:
+        path = root / name
+        try:
+            if not path.is_file():
+                continue
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        units.extend(doctor_units(text, name))
+        managed[name] = doctor_managed_lines(text)
+    candidates: list[tuple[float, str, int, str, int, str]] = []
+    for index, first in enumerate(units):
+        for second in units[index + 1:]:
+            if managed.get(first[0]) and first[1] in managed[first[0]] and (
+                managed.get(second[0]) and second[1] in managed[second[0]]
+            ):
+                continue
+            smaller = min(len(first[2]), len(second[2]))
+            if not smaller:
+                continue
+            score = len(first[2] & second[2]) / smaller
+            if score >= DOCTOR_DUPLICATE_THRESHOLD:
+                candidates.append((score, *first[:2], second[0], second[1], second[3]))
+    candidates.sort(key=lambda item: (-item[0], item[1], item[2], item[3], item[4]))
+    lines = []
+    for score, label_a, line_a, label_b, line_b, excerpt in candidates[:DOCTOR_DUPLICATE_LIMIT]:
+        lines.append(
+            f"[A3 重复候选] {label_a}:{line_a} ↔ {label_b}:{line_b}"
+            f"(相似度 {int(score * 100)}%):{excerpt[:24]}"
+        )
+    return lines
+
+
+def doctor_reference_surface(text: str) -> str:
+    """Prose surface for A4 ID scanning: drop fenced blocks and inline code.
+
+    AGENTS.md documents the file formats with sample IDs inside code fences
+    and backticks (e.g. `C-001-choose-storage.md`); those are format
+    documentation, not decision citations, and would otherwise be counted as
+    stale references in every repository.
+    """
+    kept: list[str] = []
+    inside_fence = False
+    for line in text.splitlines():
+        if line.strip().startswith("```"):
+            inside_fence = not inside_fence
+            continue
+        if not inside_fence:
+            kept.append(line)
+    return re.sub(r"`[^`\n]*`", "", "\n".join(kept))
+
+
+def doctor_stale_references(root: Path) -> list[str]:
+    """A4: living-document references to retired decisions and terminal tasks.
+
+    Counted, never gated. PRD/SOLUTION references to superseded decisions are
+    already lint errors, so they are excluded here to avoid double reporting;
+    dead-task references and the ungated living documents (DOMAIN,
+    CONVENTIONS, AGENTS.md) are what this signal adds.
+    """
+    superseded: dict[str, str] = {}
+    directory = root / RATIONALE_DIR
+    if directory.is_dir():
+        for path in rationale_entry_paths(root):
+            try:
+                body = decision_entry_body(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError):
+                continue
+            successors = SUPERSEDED_DECLARATION_RE.findall(body)
+            if successors:
+                cid_match = DECISION_ENTRY_FILE_RE.match(path.name)
+                if cid_match:
+                    for target in successors:
+                        superseded[target] = cid_match.group(1)
+    elif (root / "RATIONALE.md").is_file():
+        try:
+            store_text = decision_entries((root / "RATIONALE.md").read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError):
+            store_text = ""
+        matches = list(C_HEADING_RE.finditer(store_text))
+        for index, match in enumerate(matches):
+            end = matches[index + 1].start() if index + 1 < len(matches) else len(store_text)
+            successors = SUPERSEDED_DECLARATION_RE.findall(store_text[match.start():end])
+            for target in successors:
+                superseded[target] = match.group(1)
+    dead_tasks: dict[str, str] = {}
+    tasks_dir = root / "tasks"
+    if tasks_dir.is_dir():
+        for path in tasks_dir.rglob("*.md"):
+            try:
+                state = task_state(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError):
+                continue
+            if state in ("abandoned", "superseded"):
+                name_match = TASK_NAME_RE.match(path.name)
+                if name_match:
+                    dead_tasks[name_match.group(1)] = state
+    lines: list[str] = []
+    for name in DOCTOR_LIVING_DOCS:
+        path = root / name
+        try:
+            if not path.is_file():
+                continue
+            body = doctor_reference_surface(decision_entry_body(path.read_text(encoding="utf-8")))
+        except (OSError, UnicodeDecodeError):
+            continue
+        parts = []
+        if name not in ("PRD.md", "SOLUTION.md"):
+            hits = sorted({cid for cid in C_ID_RE.findall(body) if cid in superseded})
+            if hits:
+                detail = "、".join(f"{cid}(继任 {superseded[cid]})" for cid in hits)
+                parts.append(f"已废弃决策 {detail}")
+        dead_hits = sorted({tid for tid in T_ID_RE.findall(body) if tid in dead_tasks})
+        if dead_hits:
+            detail = "、".join(f"{tid}({dead_tasks[tid]})" for tid in dead_hits)
+            parts.append(f"终态 task {detail}")
+        if parts:
+            lines.append(f"[A4 作废引用] {name}: {';'.join(parts)}")
+    if lines:
+        lines.append(
+            "(A4 仅计数供人判;PRD/SOLUTION 引用已废弃决策已由门禁报错,不重复计入)"
+        )
+    return lines
+
+
+DOCTOR_STALENESS_COMMITS = 30
+
+
+def doctor_last_substantive_touch(root: Path, name: str) -> tuple[str, str] | None:
+    """(hash, date) of the last commit that touched the file, creation included.
+
+    A document never modified since its birth commit is the strongest decay
+    case, so unlike A1 the creation commit is not excluded here; None means
+    the file has no commit history (untracked or brand new).
+    """
+    out = run_git(root, ["log", "-1", "--format=%H %ad", "--date=short", "--", name])
+    stripped = out.strip()
+    if not stripped:
+        return None
+    hash_, _, date = stripped.splitlines()[0].partition(" ")
+    return hash_, date
+
+
+def doctor_staleness(root: Path) -> list[str]:
+    """A5: living documents untouched while the repository keeps moving.
+
+    Repo-relative on purpose: the trigger counts commits made after the
+    document's last touch, so the signal is deterministic and independent of
+    wall-clock time. AGENTS.md is excluded (hash-pinned canonical content).
+    """
+    lines: list[str] = []
+    for name in DOCTOR_LIVING_DOCS:
+        touch = doctor_last_substantive_touch(root, name)
+        if touch is None:
+            continue
+        hash_, date = touch
+        count = int(run_git(root, ["rev-list", "--count", f"{hash_}..HEAD"]).strip() or 0)
+        if count >= DOCTOR_STALENESS_COMMITS:
+            lines.append(
+                f"[A5 迟滞] {name}: 最近实质修改 {date},此后仓库已有 {count} 次提交"
+                "——文档迟滞,建议核查是否需要修订"
+            )
+    return lines
+
+
+def doctor_task_staleness(root: Path) -> list[str]:
+    """A5 extension: active tasks untouched while the repository keeps moving.
+
+    The 2026-11 registry survey found active tasks weeks stale in docsim and
+    homelab while repository activity moved on — the backlog nobody looks at.
+    Terminal tasks are excluded on purpose: their files are frozen by the
+    immutability contract, so an old terminal task is the mechanism, not
+    decay. Repo-relative counting again, no wall clock involved.
+    """
+    lines: list[str] = []
+    tasks_dir = root / "tasks"
+    if not tasks_dir.is_dir():
+        return lines
+    stale: list[tuple[int, str, str]] = []
+    for path in tasks_dir.rglob("*.md"):
+        relative = path.relative_to(root).as_posix()
+        try:
+            if task_state(path.read_text(encoding="utf-8")) != "active":
+                continue
+        except (OSError, UnicodeDecodeError):
+            continue
+        touch = doctor_last_substantive_touch(root, relative)
+        if touch is None:
+            continue
+        hash_, date = touch
+        count = int(run_git(root, ["rev-list", "--count", f"{hash_}..HEAD"]).strip() or 0)
+        if count >= DOCTOR_STALENESS_COMMITS:
+            stale.append((count, relative, date))
+    stale.sort(key=lambda item: (-item[0], item[1]))
+    for count, relative, date in stale[:DOCTOR_DUPLICATE_LIMIT]:
+        lines.append(
+            f"[A5 积压] {relative}: active 任务最近实质修改 {date},此后仓库已有 {count} 次提交"
+            "——任务积压,建议核查是否已实质完成或应废弃"
+        )
+    if len(stale) > DOCTOR_DUPLICATE_LIMIT:
+        lines.append(f"(另有 {len(stale) - DOCTOR_DUPLICATE_LIMIT} 个积压 active 任务未列出)")
+    return lines
+
+
+def run_doctor(root: Path, out: IO[str]) -> int:
+    """Document-quality checkup: measurable decay signals, report-only.
+
+    Every signal quantifies a *process* (how the documents are being changed),
+    never a semantic verdict; interpretation stays with the owner. Returns 0
+    even when signals fire — only infrastructure failure (broken git, missing
+    installation) is an error, and git failures propagate to main's backstop.
+    """
+    if not (root / "CONVENTIONS.md").is_file():
+        print(
+            "agentmap doctor: no CONVENTIONS.md — AgentMap installation not found; nothing to examine",
+            file=out,
+        )
+        return 1
+    print(f"agentmap doctor — {root}", file=out)
+    print("核心文档体检(报告级信号,不参与门禁):", file=out)
+    window = doctor_window(root)
+    histories: dict[str, tuple[int, int, int] | None] = {}
+    for name in CORE_BUDGET_FILES:
+        histories[name] = doctor_appenditivity(root, name, window)
+    for name in CORE_BUDGET_FILES:
+        history = histories[name]
+        if history is None:
+            continue
+        commits, added, deleted = history
+        ratio = added / (deleted + 1)
+        marker = ""
+        if added >= DOCTOR_APPENDITIVITY_MIN_ADDED and ratio >= DOCTOR_APPENDITIVITY_RATIO:
+            marker = "—— 追加式增长,建议安排一次文档整理 task"
+        print(
+            f"  [A1 只增不改] {name}: 近 {window} 次内触及 {commits} 次"
+            f" +{added}/-{deleted} 行{marker}",
+            file=out,
+        )
+    print(f"  [A2 预算] {doctor_budget_outlook(root, histories, window)}", file=out)
+    for line in doctor_duplicate_candidates(root):
+        print(f"  {line}", file=out)
+    for line in doctor_stale_references(root):
+        print(f"  {line}", file=out)
+    for line in doctor_staleness(root):
+        print(f"  {line}", file=out)
+    for line in doctor_task_staleness(root):
+        print(f"  {line}", file=out)
+    return 0
+
+
 def main() -> int:
+    absolutize_inherited_git_env()
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--report", action="store_true")
     parser.add_argument("--strict-tests", action="store_true")
     parser.add_argument("--staged", action="store_true")
     parser.add_argument("--pre-push", action="store_true")
+    parser.add_argument("--doctor", action="store_true")
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("hook_args", nargs="*")
     args = parser.parse_args()
@@ -3629,6 +4969,16 @@ def main() -> int:
         self_test()
         return 0
     root = args.root.resolve()
+    if args.doctor:
+        try:
+            return run_doctor(root, sys.stdout)
+        except (OSError, UnicodeDecodeError, subprocess.CalledProcessError, GitCommandError) as error:
+            print(
+                f"agentmap doctor failed on an unrecoverable I/O or git error: "
+                f"{error.__class__.__name__}: {error}",
+                file=sys.stderr,
+            )
+            return 1
     try:
         if args.staged:
             with staged_checkout(root) as snapshot:
@@ -3650,7 +5000,7 @@ def main() -> int:
                     )
             else:
                 check_outgoing_history(root, result, stdin_text)
-    except (OSError, UnicodeDecodeError, subprocess.CalledProcessError) as error:
+    except (OSError, UnicodeDecodeError, subprocess.CalledProcessError, GitCommandError) as error:
         # Last-resort backstop for environment failures (broken repository,
         # vanished files, undecodable bytes) so the hook fails closed with an
         # actionable message instead of a traceback the agent cannot act on.

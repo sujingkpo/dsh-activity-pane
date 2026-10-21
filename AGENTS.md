@@ -49,7 +49,7 @@
 
 ## 测试与需求锚定
 
-- 本项目采用 AgentMap 活文档工作流：`PRD.md`（需求 R-gg-nnn 与验收点 `<R-ID>/AC-nn`）、`SOLUTION.md`（方案与需求追溯索引）、`DOMAIN.md`（术语）、`RATIONALE.md`（决策 C-nnn，只追加）、`TODO.md`（想法池）、`CONVENTIONS.md`（过程规范与本地参数）、`tasks/`（T-nnn 执行轨迹）。
+- 本项目采用 AgentMap 活文档工作流：`PRD.md`（需求 R-gg-nnn 与验收点 `<R-ID>/AC-nn`）、`SOLUTION.md`（方案与需求追溯索引）、`DOMAIN.md`（术语）、`RATIONALE/`（决策 C-nnn，每条一个条目文件，只追加）、`TODO.md`（想法池）、`CONVENTIONS.md`（过程规范与本地参数）、`tasks/`（T-nnn 执行轨迹）。
 - **`CONVENTIONS.md` 是本仓库过程规范的权威载体**（提交规范、验证策略、移动端验证教训）；需要时查阅。
 - 测试锚点路径已登记为 `scripts/check.mjs`、`scripts/acceptance.mjs`、`e2e/specs/*.mjs`，模式 `strict`：写测试时以 `// R-gg-nnn/AC-nn` 注释锚定对应验收点。
 - 改动 PRD 的 AC 或正文时，建议顺手同步对应测试或验收证据；这是维护建议，不是自动门禁，不做也不会被拦。
