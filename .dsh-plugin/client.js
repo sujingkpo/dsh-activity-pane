@@ -5190,6 +5190,57 @@ function apply(ctx) {
 		queueSync();
 	}
 
+	/** 工作区联动已读的上一次当前会话（R-01-026/AC-15）：只在「当前会话发生切换」时推进
+	 *  已读游标。首次观测到的当前会话只登记基线——页面刷新/重连后外壳自动落到某个会话
+	 *  并不是用户去看过它，据此清未读会把真正的未读悄悄抹掉。 */
+	let lastLinkedCurrentId = "";
+	let linkedCurrentSeen = false;
+	/** 待结算的联动已读目标（sessionId → 切换时刻）：切到某会话的那一刻，它的完成提醒记录
+	 *  可能还没随 ack 通道到达（首屏立刻点击、SSE 尚在连接），本帧「已完成」分区里没有它。
+	 *  这类目标留在待结算表里，等条目出现的下一帧再推进游标——记录到达本身会经 ack SSE
+	 *  推送触发渲染，故不另起定时器重试；超窗（下条常量）即丢弃，不至于无限累积。 */
+	const linkedReadPending = new Map();
+	/** 待结算目标的有效窗：完成提醒记录属于宿主持久事实，正常情况下一次推送内即可到达。 */
+	const LINKED_READ_PENDING_MS = 60_000;
+
+	/** 工作区联动已读（R-01-026/AC-15）：在宿主工作区/会话侧栏点击会话后当前会话随之切换，
+	 *  这次切换与在窗格点卡是同一次「我看过了」，故把该会话的已读游标推进到本帧已完成条目
+	 *  的进入时刻（与 markDoneRead 同一枚游标、同一份写盘）。只清未读——不写宿主完成确认
+	 *  账本、不解除完成提醒、不触发会话跳转（R-01-002/AC-05 口径不变）。
+	 *  首次观测到的当前会话只登记基线（刷新后外壳自动落到某会话不算「看过」）。
+	 *  幂等：非切换、或目标不是仍未读的已完成条目时不写盘。
+	 *  @param {Array<object>} done 本帧「已完成」分区条目（unread 已注入）
+	 *  @param {string|null} currentId 本帧当前会话 id（宿主 retainedBy.mainView 口径） */
+	function syncWorkspaceReadLink(done, currentId) {
+		const id = currentId === null || currentId === undefined ? "" : String(currentId);
+		if (!linkedCurrentSeen) {
+			linkedCurrentSeen = true;
+			lastLinkedCurrentId = id;
+			return;
+		}
+		if (id !== lastLinkedCurrentId) {
+			lastLinkedCurrentId = id;
+			if (id !== "") linkedReadPending.set(id, Date.now());
+		}
+		if (linkedReadPending.size === 0) return;
+		const byId = new Map();
+		for (const entry of done) byId.set(String(entry?.id), entry);
+		let changed = false;
+		for (const [pendingId, at] of [...linkedReadPending]) {
+			const entry = byId.get(pendingId) ?? null;
+			// 无条目：可能只是完成提醒还没到达，留待后续帧；超窗即放弃。
+			if (entry === null) {
+				if (Date.now() - at > LINKED_READ_PENDING_MS) linkedReadPending.delete(pendingId);
+				continue;
+			}
+			linkedReadPending.delete(pendingId);
+			// 已读条目无须写盘：避免每次会话切换都刷一遍 localStorage。
+			if (entry.unread !== true) continue;
+			if (advanceDoneReadCursor(pendingId, entry)) changed = true;
+		}
+		if (changed) writeDoneReadLedger(doneReadById);
+	}
+
 	/** 全部移入历史（R-01-026/AC-14）：把当前「已完成」分区里的每个会话逐个提交完成
 	 *  确认——与卡片上的「移入历史」是同一枚写回（ackCompletion），不新增解除路径。
 	 *  确认前先把这些会话标记为已读：用户一次处理掉整批，没有理由把它们留在未读态。
@@ -9347,6 +9398,10 @@ function apply(ctx) {
 			entry.unread = doneEntryUnread(entry, doneReadById.get(String(entry.id)) ?? null);
 			doneEntriesById.set(String(entry.id), entry);
 		}
+		// 工作区联动已读（R-01-026/AC-15）：当前会话由窗格之外的入口（宿主工作区/会话侧栏、
+		// 其它插件）切换而来时，同样视为「我看过了」——把该会话在本帧「已完成」分区里的
+		// 条目一并转为已读。放在 unread 注入之后执行，条目对象即本帧要渲染的那一份。
+		syncWorkspaceReadLink(done, currentIdOf(snapshot));
 		// 轮内订阅仅对"运行中"会话建立（主会话 + 运行中的子代理），保持在运行中的订阅
 		// 数量 == 运行中会话数量（R-02-004/AC-01）；暂停等待的子代理只显示标题。
 		const runLikeIds = new Set(
@@ -10330,6 +10385,7 @@ function apply(ctx) {
 		doneCardsById.clear();
 		prevRenderedDoneIds = new Set();
 		doneEntriesById.clear();
+		linkedReadPending.clear();
 		recentCardsById.clear();
 		for (const sessionId of openRetryStates.keys()) cancelOpenRetry(sessionId);
 		openRetryStates.clear();

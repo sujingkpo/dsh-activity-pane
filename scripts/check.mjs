@@ -5248,6 +5248,22 @@ assert.ok(
 	clientSource.includes("function openSessionFromBadge(sessionId) {\n\t\tmarkDoneRead(sessionId);"),
 	"侧栏弹窗条目激活同样推进已读游标（R-01-026/AC-11、AC-12）",
 );
+// R-01-026/AC-15：工作区侧栏点击会话（当前会话切换）同样算「我看过了」——派生面在注入
+// unread 之后推进同一枚已读游标；首帧只登记基线（刷新/重连落地不算看过），且不写宿主
+// 完成确认账本（不得出现 ackCompletion 调用）。
+const syncReadFrom = clientSource.indexOf("function syncWorkspaceReadLink(done, currentId) {");
+const syncReadBody = syncReadFrom < 0
+	? ""
+	: clientSource.slice(syncReadFrom, clientSource.indexOf("\n\t}", syncReadFrom) + 3);
+assert.ok(
+	bundle.includes("syncWorkspaceReadLink(done, currentIdOf(snapshot));") &&
+		syncReadBody.includes("linkedReadPending.set(id, Date.now());") &&
+		syncReadBody.includes("advanceDoneReadCursor(pendingId, entry)") &&
+		syncReadBody.includes("writeDoneReadLedger(doneReadById)") &&
+		!syncReadBody.includes("ackCompletion") &&
+		syncReadBody.includes("if (!linkedCurrentSeen) {"),
+	"工作区侧栏点击会话即已读：只推进本地已读游标，首帧只登记基线、不写宿主确认账本（R-01-026/AC-15）",
+);
 // R-01-026/AC-10：侧栏 glyph 的完成色点带未读提示环，全部已读即摘除。
 assert.ok(
 	clientSource.includes('"data-badge-unread": counts.completedUnread > 0 ? "true" : undefined') &&
