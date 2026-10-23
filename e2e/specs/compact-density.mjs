@@ -1,4 +1,4 @@
-// R-01-021/AC-01、R-01-021/AC-02、R-01-021/AC-03、R-01-021/AC-04、R-01-021/AC-05、R-01-021/AC-06、R-01-021/AC-07、R-01-021/AC-08、R-01-011/AC-07、R-01-002/AC-14
+// R-01-021/AC-01、R-01-021/AC-02、R-01-021/AC-03、R-01-021/AC-04、R-01-021/AC-05、R-01-021/AC-06、R-01-021/AC-07、R-01-021/AC-08、R-01-021/AC-09、R-01-021/AC-10、R-01-011/AC-07、R-01-002/AC-14、R-01-002/AC-10、R-01-003/AC-06、R-01-003/AC-07、R-01-003/AC-08
 // 显示档位三档循环：切换按钮常显于「活动会话」标题行右侧工具区，紧凑→中间→完整循环；
 // 无持久化档位时默认中间档；中间档保留工作区徽标行/等待末行/最近卡预览行，紧凑档仅
 // 保留标题行；切换时当前选中卡片顶部相对滚动视口的位置稳定（滚动锚定）；档位持久化、
@@ -128,9 +128,88 @@ function activateCardByIndex(page, selector, index) {
 	}, { sel: selector, idx: index });
 }
 
+/** 紧凑档标题行 ✓ 确认按钮状态（R-01-021/AC-09）：显隐、可访问名称、最右定位与脉冲纪律。 */
+function headAckState(page, selector) {
+	return page.evaluate((sel) => {
+		const pane = document.querySelector("[data-dsh-activity-pane]");
+		const card = pane?.querySelector(sel);
+		if (!card) return null;
+		const button = card.querySelector(".dap-row .dap-confirm-icon");
+		if (!button) return null;
+		const rect = button.getBoundingClientRect();
+		const cardRect = card.getBoundingClientRect();
+		const pill = card.querySelector(".dap-row .dap-workspace");
+		const pillRect = pill?.getBoundingClientRect() ?? null;
+		const row = card.querySelector(".dap-row");
+		// 触屏命中区探测：按钮视觉盒 20×18、透明伪元素外扩至 24×24（T-182）。
+		// 在视觉盒之外、命中盒之内的四缘点取 elementFromPoint（伪元素命中返回按钮宿主），
+		// 另取命中盒外一点作负对照（应不命中按钮）。
+		const cx = rect.left + rect.width / 2;
+		const cy = rect.top + rect.height / 2;
+		const hitEdges = rect.width > 0 ? {
+			left: document.elementFromPoint(rect.left - 1.5, cy)?.closest(".dap-confirm-icon") === button,
+			right: document.elementFromPoint(rect.right + 1.5, cy)?.closest(".dap-confirm-icon") === button,
+			top: document.elementFromPoint(cx, rect.top - 2)?.closest(".dap-confirm-icon") === button,
+			bottom: document.elementFromPoint(cx, rect.bottom + 2)?.closest(".dap-confirm-icon") === button,
+		} : null;
+		return {
+			visible: !button.hidden && getComputedStyle(button).display !== "none" && rect.width > 0 && rect.height > 0,
+			label: button.getAttribute("aria-label"),
+			isButton: button.tagName === "BUTTON",
+			gapToCardRight: cardRect.right - rect.right,
+			// 行序定位（R-01-021/AC-09、AC-10）：✓ 位于行尾工作区名胶囊之后（累计运行时长已隐藏）。
+			afterInlinePill: pillRect !== null && rect.left >= pillRect.right,
+			animationName: getComputedStyle(button).animationName,
+			box: { w: rect.width, h: rect.height },
+			rowHeight: row?.getBoundingClientRect().height ?? null,
+			// 命中区几何钉死：inset -4px -3px 基于 padding 盒 18×16（button UA 默认 border-box）
+			// 解出伪元素盒 24×24；content-box 口径下为 26×26，两口径均 ≥24×24（T-182）。
+			pseudoBox: (() => { const s = getComputedStyle(button, "::before"); return s.content !== "none" ? { w: parseFloat(s.width), h: parseFloat(s.height) } : null; })(),
+			hitEdges,
+			// 命中盒上缘外 3px（rect.top-6）不应命中按钮：外扩有界（负对照）。
+			outsideHit: rect.width > 0 ? document.elementFromPoint(cx, rect.top - 6)?.closest(".dap-confirm-icon") === button : null,
+		};
+	}, selector);
+}
+
 /** 等待窗格根 data-density 达到期望档位。 */
 async function untilDensity(page, expected, label) {
 	await until(label, async () => ((await densityState(page))?.density === expected ? true : null));
+}
+
+/** 标题行行尾工作区名胶囊状态（R-01-021/AC-10）：显隐、无图标、行尾定位、固定宽、
+ *  居中、字号与着色。完整/中间档下行内节点隐藏、由独立徽标行承担归属标识（形态互斥）。 */
+function headWorkspaceState(page, selector) {
+	return page.evaluate((sel) => {
+		const pane = document.querySelector("[data-dsh-activity-pane]");
+		const card = pane?.querySelector(sel);
+		if (!card) return null;
+		const row = card.querySelector(".dap-row");
+		const pill = card.querySelector(".dap-row .dap-workspace");
+		if (!row || !pill) return null;
+		const rect = pill.getBoundingClientRect();
+		const titleRect = row.querySelector(".dap-title")?.getBoundingClientRect() ?? null;
+		const text = pill.querySelector(".dap-workspace-text");
+		const textRect = text?.getBoundingClientRect() ?? null;
+		const totalRect = row.querySelector(".dap-total-time")?.getBoundingClientRect() ?? null;
+		const confirmRect = row.querySelector(".dap-confirm-icon")?.getBoundingClientRect() ?? null;
+		const style = getComputedStyle(pill);
+		return {
+			visible: !pill.hidden && style.display !== "none" && rect.width > 0 && rect.height > 0,
+			text: (text?.textContent ?? "").trim(),
+			hasIcon: pill.querySelector(".dap-workspace-icon") !== null,
+			// 行尾定位（R-01-021/AC-10）：标题之后、行尾余员（确认按钮）之前——累计运行时长在紧凑档不显示（R-01-025/AC-07）。
+			afterTitle: titleRect !== null && rect.left >= titleRect.right,
+			beforeTail: (confirmRect === null || confirmRect.width === 0 || rect.right <= confirmRect.left)
+				&& (totalRect === null || totalRect.width === 0 || rect.right <= totalRect.left),
+			widthPx: rect.width,
+			// 固定宽胶囊文字水平居中：文本段中心与胶囊盒中心偏差 <1.5px（短名与截断态皆成立）。
+			centered: textRect !== null
+				&& Math.abs((textRect.left + textRect.right) / 2 - (rect.left + rect.right) / 2) < 1.5,
+			fontPx: parseFloat(style.fontSize),
+			colored: style.backgroundColor !== "rgba(0, 0, 0, 0)",
+		};
+	}, selector);
 }
 
 /** 按可访问名称点击档位切换按钮并等待进入期望档位；升序循环的每步推进共用此形状。 */
@@ -197,6 +276,12 @@ export default async function compactDensity({ page, url, assert }) {
 	// R-01-002/AC-14：中间档收合单行下状态年龄随胶囊保留，位于胶囊与按钮之间。
 	assert.equal(mediumFootAtDefault?.ageVisible, true, "中间档完成提醒卡状态年龄显示（R-01-002/AC-14）");
 	assert.equal(mediumFootAtDefault?.ageBetween, true, "中间档状态年龄位于胶囊与按钮之间（R-01-002/AC-14）");
+	// R-01-002/AC-10 形态互斥：非紧凑档下标题行不呈现 ✓ 确认按钮（末行文字形态不并存）。
+	const mediumHeadAck = await headAckState(page, DONE_CARD);
+	assert.equal(mediumHeadAck?.visible, false, "中间档完成提醒卡标题行不呈现 ✓ 确认按钮（R-01-002/AC-10）");
+	// R-01-021/AC-10 形态互斥：非紧凑档下标题行不呈现行内工作区胶囊（徽标行承担归属）。
+	const mediumInlinePill = await headWorkspaceState(page, DONE_CARD);
+	assert.equal(mediumInlinePill?.visible, false, "中间档完成提醒卡标题行不呈现行内工作区胶囊（R-01-021/AC-10）");
 	const mediumTraceLines = await page.evaluate((sel) => {
 		const card = document.querySelector(`[data-dsh-activity-pane] ${sel}`);
 		return card ? card.querySelectorAll(".dap-trace .dap-trace-item").length : -1;
@@ -225,6 +310,128 @@ export default async function compactDensity({ page, url, assert }) {
 	// R-01-021/AC-03：等待类别底色在紧凑下保持。
 	assert.equal(compactActive?.wait, "done", "完成提醒卡在紧凑下保留等待类别标识");
 	assert.equal(compactActive?.background, mediumBaseline?.background, "紧凑下完成提醒卡面底色与中间呈现一致（R-01-021/AC-03）");
+
+	// R-01-021/AC-09（紧凑档确认入口）：完成提醒卡标题行最右端呈现 ✓ 图标确认按钮。
+	// until 轮询吸收档位切换与渲染帧之间的一帧竞态（untilDensity 解析帧内
+	// confirmIcon.hidden 可能尚未被本帧 renderCard 重赋值）。
+	const compactHeadAck = await until("紧凑下标题行 ✓ 确认按钮呈现", async () => {
+		const state = await headAckState(page, DONE_CARD);
+		return state?.visible === true ? state : null;
+	}, 30_000);
+	assert.equal(compactHeadAck?.visible, true, "紧凑下完成提醒卡标题行呈现 ✓ 确认按钮（R-01-021/AC-09）");
+	assert.equal(compactHeadAck?.isButton, true, "✓ 确认控件为按钮元素（R-01-021/AC-09）");
+	assert.equal(compactHeadAck?.label, "移入历史", "✓ 确认按钮可访问名称为「移入历史」（R-01-002/AC-10）");
+	assert.equal(compactHeadAck?.animationName, "none", "✓ 确认按钮不参与末行脉冲（按钮不闪纪律，R-01-002/AC-08）");
+	assert.ok(
+		compactHeadAck && compactHeadAck.gapToCardRight >= 0 && compactHeadAck.gapToCardRight <= 24,
+		`✓ 确认按钮位于标题行最右端（gap=${Math.round(compactHeadAck?.gapToCardRight ?? -1)}px，R-01-021/AC-09）`,
+	);
+	assert.equal(compactHeadAck?.afterInlinePill, true, "✓ 确认按钮位于行尾工作区名胶囊之后（R-01-021/AC-09、AC-10）");
+	// 视觉盒与行框几何钉死：button UA 默认 border-box 下视觉盒 20×18、标题行框 16→20px（T-182）。
+	assert.equal(compactHeadAck?.box.w, 20, "✓ 确认按钮视觉盒宽 20px（R-01-021/AC-09）");
+	assert.equal(compactHeadAck?.box.h, 18, "✓ 确认按钮视觉盒高 18px（R-01-021/AC-09）");
+	assert.equal(compactHeadAck?.rowHeight, 20, "✓ 确认按钮标题行框 20px（16px 行高 + margin 2px，R-01-021/AC-09）");
+	assert.deepEqual(compactHeadAck?.pseudoBox, { w: 24, h: 24 }, "✓ 确认按钮透明伪元素命中盒 24×24（inset -4px -3px 基于 padding 盒 18×16，R-01-021/AC-09）");
+	assert.deepEqual(compactHeadAck?.hitEdges, { left: true, right: true, top: true, bottom: true }, "✓ 确认按钮触屏命中区四缘外扩命中（视觉盒四缘外 1.5~2px 点命中，R-01-021/AC-09）");
+	assert.equal(compactHeadAck?.outsideHit, false, "✓ 确认按钮命中区外扩有界（命中盒外 3px 不命中，R-01-021/AC-09）");
+
+	// R-01-021/AC-10（紧凑档工作区名胶囊）：标题行行尾内嵌固定宽无图标胶囊、文字居中。
+	const compactPill = await until("紧凑下标题行工作区名胶囊呈现", async () => {
+		const state = await headWorkspaceState(page, DONE_CARD);
+		return state?.visible === true ? state : null;
+	}, 30_000);
+	assert.equal(compactPill?.visible, true, "紧凑下完成提醒卡标题行呈现工作区名胶囊（R-01-021/AC-10）");
+	assert.equal(compactPill?.hasIcon, false, "行内工作区胶囊不含文件夹图标（无图标形态，R-01-021/AC-10）");
+	assert.ok(
+		compactPill?.afterTitle === true && compactPill?.beforeTail === true,
+		`行内工作区胶囊位于标题行行尾（afterTitle=${compactPill?.afterTitle}，beforeTail=${compactPill?.beforeTail}，R-01-021/AC-10）`,
+	);
+	assert.ok(
+		Math.abs((compactPill?.widthPx ?? 0) - 84) <= 0.5,
+		`行内工作区胶囊固定宽度 84px（实测 ${Math.round((compactPill?.widthPx ?? 0) * 10) / 10}px，R-01-021/AC-10）`,
+	);
+	assert.equal(compactPill?.centered, true, "固定宽胶囊内文字水平居中（R-01-021/AC-10）");
+	assert.ok(
+		(compactPill?.fontPx ?? 0) >= 10.5,
+		`行内工作区胶囊字号 ≥10.5px（实测 ${compactPill?.fontPx ?? "n/a"}px，R-01-003/AC-07）`,
+	);
+	assert.equal(compactPill?.colored, true, "行内工作区胶囊按槽位变量着色（非透明底，R-01-003/AC-08）");
+	assert.ok(
+		(compactPill?.text.length ?? 0) > 0,
+		"行内工作区胶囊文本非空（文本值与实时更新由与徽标行同源双写结构承载，R-01-021/AC-10、R-01-025/AC-07）",
+	);
+
+	// R-01-021/AC-10（标题起点对齐）：固定宽行尾胶囊使各卡会话标题起点一致；
+	// 取完成提醒卡与另一张非子代理卡对比 title 左缘。
+	const titleAlignment = await page.evaluate(() => {
+		const cards = [...document.querySelectorAll('[data-dsh-activity-pane] .dap-card[data-wait="done"]')].slice(0, 2);
+		const lefts = cards.map((card) => card.querySelector(".dap-row .dap-title")?.getBoundingClientRect().left ?? null);
+		return lefts.every((l) => l !== null) ? Math.max(...lefts) - Math.min(...lefts) : null;
+	});
+	assert.ok(
+		titleAlignment !== null && titleAlignment <= 0.5,
+		`紧凑下各卡会话标题起点对齐（跨卡 title 左缘最大偏差 ${titleAlignment?.toFixed(1) ?? "n/a"}px，R-01-021/AC-10）`,
+	);
+
+	// R-01-025/AC-07：累计运行时长在紧凑呈现下不显示（完整/中间档保持）。
+	const compactTotalHidden = await page.evaluate(() => {
+		const total = document.querySelector('[data-dsh-activity-pane] .dap-card[data-wait="done"] .dap-row .dap-total-time');
+		if (total === null) return null;
+		return getComputedStyle(total).display === "none" ? "hidden" : "visible";
+	});
+	assert.equal(compactTotalHidden, "hidden", "紧凑下标题行累计运行时长不可见（R-01-021/AC-02、R-01-025/AC-07）");
+
+	// 无归属兜底（R-01-021/AC-10）：无归属会话的渲染输出以 hidden 表达；e2e 数据通道
+	// 会话全部归属工作区（cwd 必中预置工作区），故以渲染输出状态等价物（hidden 属性）
+	// 直接驱动 CSS 门控，验证 compact 展示规则不压过同特异性后声明的 [hidden] 兜底。
+	const pillHiddenGate = await page.evaluate(() => {
+		const pill = document.querySelector('[data-dsh-activity-pane] .dap-card[data-wait="done"] .dap-row .dap-workspace');
+		if (pill === null) return false;
+		pill.setAttribute("hidden", "");
+		const display = getComputedStyle(pill).display;
+		pill.removeAttribute("hidden");
+		return display === "none";
+	});
+	assert.equal(pillHiddenGate, true, "compact 展示规则不压过 [hidden] 兜底——无归属胶囊不显示（R-01-021/AC-10）");
+
+	// R-01-021/AC-10（截断）：固定宽胶囊内超长名称省略号截断不换行、行框不受影响；
+	// 同步窗口内改写文本后立即量测，渲染订阅不会在中途覆盖。
+	const pillTruncate = await page.evaluate(() => {
+		const pill = document.querySelector('[data-dsh-activity-pane] .dap-card[data-wait="done"] .dap-row .dap-workspace');
+		if (pill === null) return null;
+		const row = pill.closest(".dap-row");
+		const text = pill.querySelector(".dap-workspace-text");
+		const original = text.textContent;
+		const rowHeightBefore = row.getBoundingClientRect().height;
+		text.textContent = "超出固定宽度以触发省略截断的足够长的临时工作区名";
+		// 固定宽（84px、border-box）下超长名称由 .dap-workspace-text 既有 ellipsis 承载；
+		// 可观察口径：文本截断（scrollWidth>clientWidth）、不换行、行框高度不变。
+		const fixedWidth = pill.getBoundingClientRect().width;
+		const clipped = text.scrollWidth > text.clientWidth;
+		const nowrap = getComputedStyle(text).whiteSpace === "nowrap";
+		const rowHeightAfter = row.getBoundingClientRect().height;
+		text.textContent = original;
+		return { fixedWidth: fixedWidth, clipped, nowrap, rowHeightBefore, rowHeightAfter };
+	});
+	assert.ok(
+		pillTruncate?.clipped === true && pillTruncate?.nowrap === true
+			&& pillTruncate?.rowHeightBefore === pillTruncate?.rowHeightAfter,
+		`固定宽胶囊内超长名称省略截断且不换行、行框不变（实测 width=${pillTruncate?.fixedWidth} clipped=${pillTruncate?.clipped} nowrap=${pillTruncate?.nowrap} row ${pillTruncate?.rowHeightBefore}→${pillTruncate?.rowHeightAfter}，R-01-021/AC-10）`,
+	);
+
+	// R-01-002/AC-10（紧凑档确认路径）：激活 ✓ 按钮解除完成提醒并迁入最近历史区，不触发跳转。
+	const doneBeforeAck = await page.locator('[data-dsh-activity-pane] .dap-card[data-wait="done"]').count();
+	const recentBeforeAck = await page.locator('[data-dsh-activity-pane] .dap-card[data-kind="recent"]').count();
+	await page.evaluate(() => document.querySelector(".dap-card[data-wait='done'] .dap-row .dap-confirm-icon")?.click());
+	await until("紧凑下确认后完成卡迁入历史区", async () => {
+		const done = await page.locator('[data-dsh-activity-pane] .dap-card[data-wait="done"]').count();
+		const recent = await page.locator('[data-dsh-activity-pane] .dap-card[data-kind="recent"]').count();
+		return done < doneBeforeAck && recent > recentBeforeAck ? true : null;
+	}, 30_000);
+	assert.equal((await densityState(page)).density, "compact", "紧凑下确认迁移动作不解除档位（R-01-021/AC-07）");
+	for (const title of KEEP_DONE_TITLES) {
+		assert.equal(await mainAreaHas(page, title), false, `确认动作不触发向被确认会话的跳转（${title}，R-01-002/AC-10）`);
+	}
 
 	// R-01-021/AC-04：紧凑下激活卡片照常跳转。
 	await activateCardByIndex(page, RECENT_CARD, 1);

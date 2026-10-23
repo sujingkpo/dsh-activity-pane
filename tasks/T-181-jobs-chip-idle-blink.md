@@ -1,10 +1,10 @@
 ---
 doc-type: task
 mutation: lifecycle
-id: T-175
+id: T-181
 ---
 
-# T-175 后台任务数量注回合结束闪烁
+# T-181 后台任务数量注回合结束闪烁
 
 状态: completed
 关联: R-01-023
@@ -59,7 +59,7 @@ id: T-175
 | R-01-023/AC-09、AC-10 | 不变 | E2E+unit | 保留 | 状态点节奏同源（复用 dap-pulse）与档位门控不变 |
 | R-01-025/AC-08 | 不变 | E2E | 保留 | CSS 动画不触发 rAF，低档静默门禁不受影响 |
 | R-01-009/AC-09 | 修改（R-01-023/AC-11 态暂停）：jobs-only 态时间线执行中圆点与标题状态点停闪；其余状态承诺不变，运行窗内圆点照常呼吸 | E2E | 保留+新增 | `e2e/specs/background-jobs.mjs#R-01-023/AC-11` 三态往返（运行窗恢复 `dap-pulse` 即 AC-09 正向复核）；`scripts/check.mjs#R-01-023/AC-11` 停闪 CSS 契约；`e2e/specs/session-lifecycle.mjs#R-01-009/AC-09` 运行窗圆点闪烁回归 |
-| R-01-020/AC-01、AC-03、AC-05 | 缺陷修复（T-175 E2E 复盘发现，map 不变）：懒回填 GET 响应原经全量应用清除既有 busy 记录——宿主登记滞后于卡片渲染时，陈旧空快照迟到落地使运行卡累计时长在回合中段消失（并诱发下游几何断言 flake） | E2E | 新增回归 | `e2e/specs/busy-backfill-race.mjs` 场景 1 变异验证（旧语义下样本 40 缺席 17）；场景 2 断言 SSE 拒连时 GET 回填仍填充缺失会话；`scripts/check.mjs` bundle 契约断言 applyBusyBackfill + no-store |
+| R-01-020/AC-01、AC-03、AC-05 | 缺陷修复（T-181 E2E 复盘发现，map 不变）：懒回填 GET 响应原经全量应用清除既有 busy 记录——宿主登记滞后于卡片渲染时，陈旧空快照迟到落地使运行卡累计时长在回合中段消失（并诱发下游几何断言 flake） | E2E | 新增回归 | `e2e/specs/busy-backfill-race.mjs` 场景 1 变异验证（旧语义下样本 40 缺席 17）；场景 2 断言 SSE 拒连时 GET 回填仍填充缺失会话；`scripts/check.mjs` bundle 契约断言 applyBusyBackfill + no-store |
 
 ## 验证矩阵
 
@@ -85,4 +85,4 @@ id: T-175
 - review: 独立子代理两轮（subagent 审整链一轮、busy delta 复审一轮），结论均 non-blocking、无 blocking finding；核验八项全过（判定口径、签名分量、按需 DOM 写入、CSS 前缀隔离、断言非恒真与 bundle 契约一字不差、三态时序、唯一调用分支与骨架无 chip、四方一致性）；busy delta 复审 F2/F3 已修（场景 2 回填计数与读数单调断言、SSE 通道唯一整体替换负向契约），N-1（selfRunning 措辞 vs `!== true`）不采纳并记录理由（真实数据流恒布尔、与既有 jobsOnly 冻结判定同口径）。
 - commit: 05c61da
 
-T-175
+T-181

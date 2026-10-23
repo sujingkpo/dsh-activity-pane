@@ -3676,7 +3676,7 @@ const emptyLabelViews = { jA: [{ id: "job-9", kind: "bash", label: "", status: "
 const emptyLabelEntry = buildEntries(jobbedSnapshot, [], {}, null, null, [], null, emptyLabelViews).find((entry) => entry.kind === "job");
 assert.ok(emptyLabelEntry !== undefined, "R-01-023/AC-06 前置：内容不可得的在跑任务仍产出子卡");
 assert.equal(emptyLabelEntry.title, "", "R-01-023/AC-06 任务内容不可得时条目内容为空串");
-// R-01-023/AC-11（T-175）：数量注闪烁门控三态——仅由在跑后台任务支撑运行呈现（回合已结束）闪烁；
+// R-01-023/AC-11（T-181）：数量注闪烁门控三态——仅由在跑后台任务支撑运行呈现（回合已结束）闪烁；
 // 自身回合运行中、阻塞等待（kind awaiting，回合尚未结束）、无在跑任务均不闪烁；入参非法按无任务处理。
 const chipJobOnly = { kind: "running", selfRunning: false, liveJobs: [{ id: "job-1", status: "running", startedAt: 1 }] };
 assert.deepEqual(
@@ -3709,7 +3709,7 @@ assert.deepEqual(
 	],
 	"R-01-023/AC-11 入参缺失或形状非法按无任务处理不抛错",
 );
-// R-01-023/AC-11（T-175）：selfRunning 入渲染签名——任务在跑期间自身回合结束/重启驱动
+// R-01-023/AC-11（T-181）：selfRunning 入渲染签名——任务在跑期间自身回合结束/重启驱动
 // 闪烁门控重绘（liveJobs 不变时其余签名分量可能全部不变）。
 assert.notEqual(
 	cardSignature(jobbedEntries),
@@ -3885,6 +3885,14 @@ const mediumCardRules = (() => {
 })()
 const errorScopedRules = mediumCardRules.filter((rule) => /data-wait\s*=\s*["']?error/.test(rule))
 assert.deepEqual(errorScopedRules, [], "错误提醒卡不参与中间档收合——错误信息正文必须保留，按钮落在正文行右侧（R-01-002/AC-09、AC-10，C-102）");
+// R-01-021/AC-09（紧凑档确认入口，C-105）：✓ 图标确认按钮随骨架创建于标题行最右，
+// 挂可访问名称「移入历史」，[hidden] 显式覆盖（display 规则优先级高于隐藏属性）。
+assert.ok(
+	bundle.includes('button.className = "dap-confirm-icon"') &&
+		bundle.includes('button.setAttribute("aria-label", "移入历史")') &&
+		bundle.includes("[data-dsh-activity-pane] .dap-confirm-icon[hidden] { display: none; }"),
+	"紧凑档完成提醒卡 ✓ 确认按钮随骨架创建、可访问名称「移入历史」且隐藏经显式覆盖（R-01-021/AC-09、R-01-002/AC-10）",
+);
 assert.ok(bundle.includes("writeStoredDensity(densityLevel)"), "显示档位切换持久化于 localStorage（R-01-021/AC-06）");
 // R-01-025 档位资源纪律：紧凑档数据面门控与渲染面跳写的 bundle 契约
 assert.ok(
@@ -4183,7 +4191,7 @@ assert.ok(
 		"状态点仅 running/stopping 以 dap-pulse 1.2s 闪烁、与主卡状态点同源（R-01-023/AC-09）",
 	);
 }
-// R-01-023/AC-11（T-175）：数量注闪烁门控——三态由 core 纯函数判定、jobs-only 态经卡根
+// R-01-023/AC-11（T-181）：数量注闪烁门控——三态由 core 纯函数判定、jobs-only 态经卡根
 // data-jobs-only 属性写入（单一门控源），CSS 以 dap-pulse 同源同节奏闪烁（回合已结束
 // 仍有在跑后台任务时），并同门控暂停 R-01-009/AC-09 的圆点呼吸（时间线执行中行圆点
 // 与卡片标题状态点静止），数量注成为卡片唯一运动元素。
@@ -4212,7 +4220,7 @@ assert.ok(
 		"jobs-only 态暂停卡片标题状态点呼吸（R-01-023/AC-11）",
 	);
 }
-// R-01-020（T-175 复盘）：懒回填 GET 响应按 id 只补缺（applyBusyBackfill），不用陈旧
+// R-01-020（T-181 复盘）：懒回填 GET 响应按 id 只补缺（applyBusyBackfill），不用陈旧
 // 点读回退 SSE 已推送的新鲜状态；请求禁缓存；旧的全量应用调用必须已从 GET 路径消失。
 assert.ok(
 	bundle.includes("function applyBusyBackfill(state)")
@@ -4469,8 +4477,8 @@ assert.ok(bundle.includes("detail.modelLive"), "目录订阅已产值时晚到�
 assert.ok(!bundle.includes("events.mux"), "不常驻全局 mux，当前会话使用原生 session subscribe");
 assert.ok(
 	bundle.includes('return [head, row, makeEl("div", "dap-trace"), progressRow, makeStatsRow()];')
-		&& bundle.includes('row.append(makeEl("span", "dap-dot"), makeEl("span", "dap-title"), makeEl("span", "dap-jobs-chip"), makeEl("span", "dap-total-time"));'),
-	"running 卡 token 统计骨架位于进度条骨架之后、标题行承载后台数量注（R-01-023）",
+		&& bundle.includes('row.append(makeEl("span", "dap-dot"), makeEl("span", "dap-title"), makeEl("span", "dap-jobs-chip"), makeWorkspacePill(), makeEl("span", "dap-total-time"));'),
+	"running 卡 token 统计骨架位于进度条骨架之后、标题行承载后台数量注与行尾工作区名胶囊（R-01-023、R-01-021/AC-10）",
 );
 assert.ok(
 	bundle.indexOf('statsRow.append(makeEl("span", "dap-token-main"), makeEl("span", "dap-token-time"))') > -1,
