@@ -1,8 +1,8 @@
 <!--
-	本文件是本 fork 的项目说明，正文由 fork 维护者维护。
-	分工：仓库根 AGENTS.md 是上游 AgentMap 工作系统原文，随上游合并更新，本 fork 不参与改写；
-	      本文件承载本 fork 的项目概览、目录职责、构建与验证策略、代码风格与提交约定。
-	合并上游时若根 AGENTS.md 冲突，直接取上游版本（git checkout --theirs -- AGENTS.md），本文件不受影响。
+	本文件是仓库根 AGENTS.md 的正文来源：根 AGENTS.md 与本文件逐字一致，只放在两处。
+	分工：本 fork 不维护上游 AgentMap 工作系统的文档副本，本文件只承载 fork 项目说明。
+	合并上游时：若根 AGENTS.md 冲突，先取上游版本（git checkout --theirs -- AGENTS.md）让合并走完；
+	合并提交完成后，用本文件内容覆盖根 AGENTS.md，恢复 fork 项目说明。
 -->
 # AGENTS
 
@@ -22,7 +22,7 @@
 - `.dsh-plugin/index.mjs` — 静态宿主入口，转发 `apply`/`inject`/`name`/`Config` 自 `src/host.mjs`；免构建，不要在此写实现。
 - `.dsh-plugin/client.js` — **生成物且入库**：由 `scripts/build-client.mjs` 拼接 `core.mjs` + `navigation.mjs` + `client.mjs` 得到，禁止手改。
 - `scripts/` — 构建、单元检查、staged bundle 一致性、watch、人工验收清单、性能基线。
-- `e2e/` — `run.mjs` 运行器 + `boot.mjs` 隔离环境 + `specs/*.mjs`（27 个 spec）+ `mock-llm.mjs`。
+- `e2e/` — `run.mjs` 运行器 + `boot.mjs` 隔离环境 + `specs/*.mjs`（28 个 spec）+ `mock-llm.mjs`。
 - `tools/` — AgentMap 校验器（Python）：`agentmap_lint.py`、`test_impact_lint.py`、`agentmap_validate_commit_msg.py`。
 - 其它：`cordis.patch.yml`（以独立 bundle 挂载插件）、`assets/`（截图）、`screenshots.json`。
 
@@ -85,5 +85,5 @@
 - 工作区可能存在未跟踪的调试残留（`debug.log`、`tmp-rc-diff/`、`.dsh-ops/`）：与代码改动无关，不要顺手清理或提交。
 - 跑 `scripts/check.mjs` 与 E2E 需完整文件权限（会 `spawnSync` 捕获子进程，受限沙箱下会报 EPERM）。
 - fork 关系：`origin` = `git@github.com:sujingkpo/dsh-activity-pane.git`，`upstream` = `https://github.com/ccll/dsh-activity-pane.git`；改动只存在本 fork，合并上游时优先新增/扩展，避免重排既有代码以降低冲突。
-- `AGENTS.md` 曾因本 fork 回退到 AgentMap 项目模板而被 `tools/agentmap_lint.py` 的 `CANONICAL_FILES_SHA256` 哈希锁定；该锁定已解除，本文档可自由维护，`pnpm lint:agentmap` 不再因此报错。
+- `AGENTS.md` 上游会拿它比对 `tools/agentmap_lint.py` 的 `CANONICAL_FILES_SHA256`（AgentMap 工作系统原文的哈希）。本 fork 用项目说明覆盖后，`pnpm lint:agentmap` 会报一条 `AGENTS.md: must match the canonical AgentMap runtime contract`；这是有意接受的成本（上游自己的 AGENTS.md 同样不匹配该哈希），其余 lint 结论不受影响。
 - 本 fork 的 CI（`.github/workflows/ci.yml`）只保留 `workflow_dispatch` 手动触发，push 不再自动跑验证。
