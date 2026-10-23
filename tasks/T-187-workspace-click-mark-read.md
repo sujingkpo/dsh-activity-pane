@@ -6,10 +6,10 @@ id: T-187
 
 # T-187 工作区点击会话联动「已完成」已读
 
-状态: active
+状态: completed
 关联: R-01-026
-风险等级: minor
-风险面: 无（语义行数低于阈值；改动落在 client 半侧单一派生点，宿主半与数据表未动）
+风险等级: major
+风险面: 派生点与本地已读游标（新增结算通道 + 写盘时机）；实测语义行数 159 超 minor 阈值 50（文档补回 SOLUTION 合并丢失内容占 57 行），按升档条件取 major
 
 ## 背景与目标
 
@@ -65,7 +65,14 @@ id: T-187
 
 ## 终态与证据
 
-- 实现: `src/client.mjs` `syncWorkspaceReadLink`（2203-2252）、派生点调用（6408-6412）、卸载清理 `linkedReadPending.clear()`；`.dsh-plugin/client.js` 经 `pnpm build:client` 同步。
-- 测试: `node scripts/check.mjs` 全过（含新增 AC-15 断言）；`node scripts/check-staged-client.mjs` 通过；按仓库「全手动验证」策略未跑 E2E（东家未要求）。
-- 待办: 提交后回填 commit 哈希、SOLUTION 对照与独立 review 证据，再把状态改为 completed。
-- 语义行数: 待提交后按 lint 口径回填（`git diff -M` 剥注释与空行、排除 `.dsh-plugin/`）。
+- 实现: `src/client.mjs` 新增 `syncWorkspaceReadLink(done, currentId)`（2203-2252）与派生点调用（6408-6412），卸载时 `linkedReadPending.clear()`；`.dsh-plugin/client.js` 经 `pnpm build:client` 同步。
+- 测试: `node scripts/check.mjs` 全过（含 AC-15 断言组），`node scripts/host-reconcile.test.mjs` 全过，`node scripts/check-staged-client.mjs` 通过；`python tools/test_impact_lint.py` 通过；按仓库「全手动验证」策略未跑 E2E（东家未要求）。
+- SOLUTION 对照: 已核对 `SOLUTION.md`——「已读写入的单一入口」补入第三条路径（窗格之外入口，AC-15）、R-01-026 追溯行补「窗格之外入口切换当前会话的联动已读」；同步补回上一轮合并丢失的角标节与 R-01-027 对账不变量，实现与方案无漂移。
+- commit: cb27a9a（⭐ 功能(activity-pane): 窗格之外切换当前会话即把「已完成」未读标为已读）
+- review:
+  - 审核方: 独立子代理 code-review（DSH dsh_code_review，审查本任务工作区改动）
+  - 目的理解: 让宿主工作区/会话侧栏等窗格之外的入口切换到某个处于完成提醒的会话时，也能把插件「已完成」分区里该会话的未读标记转为已读；只清未读，不写宿主完成确认账本、不解除完成提醒、不触发会话跳转，刷新/重连首屏不算看过。
+  - 执行方式: 逐行读 `src/client.mjs` 新增的 `syncWorkspaceReadLink` 及其调用点、`scripts/check.mjs` 的 AC-15 断言组与 `PRD.md` R-01-026/AC-15 正文，比对三者口径；并单独核对 SOLUTION.md 的纯加法补回是否夹带上游已演进内容的倒退。
+  - 问题与修复: 首轮发现（1）`syncWorkspaceReadLink` 曾在渲染收口处加 `queueSync()` 自唤醒，会形成渲染自我续命死循环——已删除，改由 ack 记录到达的推送帧自然重算；（2）SOLUTION.md 首版用整份 `git merge-file` 解冲突，会删掉 15 行上游 base 已有且 HEAD 已演进的内容——已 `git checkout` 撤销，改为在 HEAD 上纯加法补回并逐行核对删除集（14 行删除全为有意替换）；（3）`test_impact_lint` 报 SOLUTION 变更缺 DESIGN 行——已在 T-187 测试影响表补 SOLUTION 行。
+  - 复审结论: 无 blocking finding；新回合、刷新首帧、ack 记录晚到（60s 待结算窗）与条目始终不出现（超窗丢弃）四条边界均有对应分支与断言。
+- 语义行数: 159
