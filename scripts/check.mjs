@@ -5270,6 +5270,14 @@ assert.ok(
 		bundle.includes(".dap-badge-glyph[data-badge-unread]::before"),
 	"侧栏角标按未读完成数给出提示环、归零即摘（R-01-026/AC-10、AC-12）",
 );
+// R-01-026/AC-16：`已完成` 点的点亮判据是**未读完成数**，不是计数——全部已读即与计数为 0
+// 同款置灰，点亮本身代表「还有没看过的完成提醒」；文字通道同时明说「（已全部读）」。
+assert.ok(
+	bundle.includes('const dots = [["running", counts.running > 0], ["interaction", counts.interaction > 0], ["completed", counts.completedUnread > 0]];') &&
+		clientSource.includes('counts.completed > 0 ? "（已全部读）" : "")') &&
+		!clientSource.includes('["completed", counts.completed]'),
+	"「已完成」点按未读完成数点亮、全部已读即置灰，无障碍名称给出「已全部读」（R-01-026/AC-16）",
+);
 // R-01-026/AC-09：弹窗条目行的状态文本只在「已完成」组出现，其余组摘属性隐藏文本。
 assert.ok(
 	clientSource.includes('const unread = tone === "completed" ? entry.unread === true : null;') &&

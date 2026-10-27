@@ -444,7 +444,7 @@ flowchart LR
 
 ### 宿主侧栏角标
 - 职责:
-  - 入口行角标：在宿主左栏面板行列表的 `sidebar.panellist` 槽位注册「活动会话」入口行，行内 glyph 呈现三状态角标（运行中/需要交互/已完成），计数为 0 的点置灰不隐藏（实现 R-01-026）
+  - 入口行角标：在宿主左栏面板行列表的 `sidebar.panellist` 槽位注册「活动会话」入口行，行内 glyph 呈现三状态角标（运行中/需要交互/已完成），计数为 0 的点置灰不隐藏，「已完成」点按未读完成数点亮、全部已读即置灰（实现 R-01-026/AC-16）
   - 分组明细弹窗：接管入口行的点击以打开自建弹窗，按三类列出计数与条目，条目激活跳转会话；Escape 关闭并把焦点归还入口行（实现 R-01-026）
   - 完成提醒的已读/未读标识：窗格「已完成」分区卡片与弹窗「已完成」组条目按同一已读游标呈现两种状态；角标按未读数给出提示与无障碍读数（实现 R-01-026/AC-09～AC-12）
   - 已完成的批量动作：两处段头各提供「全部已读」与「全部移入历史」入口，前者只推进本地已读游标，后者复用卡片「移入历史」的同一枚完成确认写回（实现 R-01-026/AC-13、AC-14）
@@ -454,7 +454,7 @@ flowchart LR
   - 口径单点：三类条目与计数由 `src/core.mjs#classifyActiveEntries(entries, doneReadById)` 一次归类给出（运行中 = kind `running`；需要交互 = kind `awaiting` 且 `waitClass` `blocked`；已完成 = kind `awaiting` 且 `waitClass` `done`；计数即各组长度，`statusBadges(entries)` 复用同一归类），渲染层不自算同口径副本，角标计数与弹窗明细必然同源。
   - 已读/未读判定单点：传入已读游标（sessionId → 已读时的 `lastTurnEnd`）时，归类函数对完成提醒条目就地写入 `unread = doneEntryUnread(entry, readAt)`（`stateAt > readAt` 即未读，进入时刻不可得时保守判为未读）；窗格「已完成」分区、弹窗条目与角标未读读数消费同一字段，不再各持一份判定（R-01-026/AC-09～AC-12）。
   - 已读写入的单一入口：`markDoneRead(sessionId)` 把游标推进到条目当前 `stateAt` 并持久化到 localStorage（键 `dsh-activity-pane:done-read`）；窗格卡片激活、弹窗条目激活与窗格之外的入口（宿主工作区/会话侧栏等切换当前会话）都经它写入——三条路径是同一次「我看过了」；窗格之外那条由 `syncWorkspaceReadLink(done, currentId)` 在每轮派生 `unread` 之后按当前会话切换触发，写盘走同一枚 `advanceDoneReadCursor` 与 `writeDoneReadLedger`，页面刷新/重连首帧只登记基线不推进（R-01-026/AC-15）。该游标独立于宿主完成确认账本，写已读不解除完成提醒（R-01-002/AC-05 不变）。
-  - 未读角标提示：`badgeCounts.completedUnread` 为未读完成提醒数，大于 0 时 glyph 挂 `data-badge-unread` 并显示静态外圈提示环（`::before`，完成提醒同源绿色 `#3fbf7f`），无障碍名称追加「（n 个未读）」；提示环不闪——闪动通道留给要求立即行动的「需要交互」（R-01-026/AC-10）。
+  - 未读角标提示：`badgeCounts.completedUnread` 为未读完成提醒数，大于 0 时 glyph 挂 `data-badge-unread` 并显示静态外圈提示环（`::before`，完成提醒同源绿色 `#3fbf7f`），无障碍名称追加「（n 个未读）」；提示环不闪——闪动通道留给要求立即行动的「需要交互」（R-01-026/AC-10）。该读数同时是「已完成」点的点亮判据：`badgeCounts.completedUnread > 0` 才点亮，全部已读时与计数为 0 同款置灰——点亮本身即表示还有没看过的完成提醒，不再出现「都读过了却仍亮绿」；此时无障碍名称改说「（已全部读）」，读屏用户不依赖颜色也知道该点为何是灰的（R-01-026/AC-16）。
   - 一键已读：`markAllDoneRead()` 遍历 `doneEntriesById` 把未读条目的游标逐个推到各自 `stateAt`，写盘一次并触发一轮渲染；窗格「已完成」分区段头（`.dap-done-head .dap-read-all`）与角标弹窗「已完成」组段头各一枚同名入口，两处都只在未读数大于 0 时呈现，可访问名称给出待标记条数；点击 `preventDefault` + `stopPropagation`，不触发卡片激活与会话跳转，也不写宿主完成确认账本（R-01-026/AC-13）。
   - 快照与订阅：模块级 `badgeCounts`/`badgeEntries` 经 `subscribeBadgeCounts`/`notifyBadgeCounts` 暴露给 glyph 组件（React `useSyncExternalStore`）；计数相对上一帧增加即播一次强调动画，「需要交互」升级为 alert 变体；动画属性由定时器收口，渲染期不重复续挂。
   - 一键移入历史：`ackAllDone()` 先 `markAllDoneRead()`（一次处理掉整批，没有理由把它们留在未读态）、再对 `doneEntriesById` 里的每个会话逐个调 `ackCompletion(id)`——与卡片「移入历史」是同一枚写回，乐观更新与失败回滚逐条独立，不新增解除路径、不自建网络通道；窗格「已完成」分区段头（`.dap-done-head .dap-done-all`）与弹窗「已完成」组段头各一枚入口，两处按分区条数显隐（与未读无关），点击 `preventDefault` + `stopPropagation`，不触发会话跳转（R-01-026/AC-14）。

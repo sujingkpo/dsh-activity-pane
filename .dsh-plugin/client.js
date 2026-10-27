@@ -3125,7 +3125,9 @@ const CSS = `
 /* ---- 宿主侧栏三状态角标入口行（sidebar.panellist 注册行内的 glyph）----
    宿主 PanelRow 只给 16/18px 的字形盒，三个带计数的角标放不进一行；因此 glyph 呈现
    三枚状态色点（运行中/需要交互/已完成），精确计数与分组明细在点击后打开的弹窗里，
-   以及 glyph 的 aria-label / title 上。色点按计数为 0 时置灰，不隐藏（避免布局跳动）。 */
+   以及 glyph 的 aria-label / title 上。色点计数为 0 时置灰、不隐藏（避免布局跳动）；
+  「已完成」点的置灰判据是**未读完成数**而非计数（R-01-026/AC-16）：点亮即代表还有没看过的
+  完成提醒，全部已读后与计数为 0 同款灰点——无需新增第三种颜色，4px 点也分不清暗绿亮绿。 */
 .dap-badge-glyph {
   position: relative;
   display: flex;
@@ -5593,18 +5595,25 @@ function apply(ctx) {
 
 	/** 三状态角标图标组件（sidebar.panellist 的 glyph）：宿主给 16/18px 字形盒，
 	 *  放不下三个带数字的角标，故呈三枚状态色点——精确计数在 aria-label/title
-	 *  与点击后打开的面板里。计数为 0 的点置灰不隐藏（避免布局跳动）。 */
+	 *  与点击后打开的面板里。计数为 0 的点置灰不隐藏（避免布局跳动）。
+	 *  「已完成」点的点亮判据不是计数而是**未读数**（R-01-026/AC-16）：全部已读时
+	 *  与计数为 0 同款置灰——点亮本身就代表「还有没看过的完成提醒」。 */
 	function createStatusBadgeGlyph() {
 		return function StatusBadgeGlyph() {
 			const react = rightReact();
 			// useSyncExternalStore：宿主重渲染与计数变化都能拿到最新快照。
 			react.useSyncExternalStore(subscribeBadgeCounts, () => badgeCounts);
 			const counts = badgeCounts;
-			// 无障碍名称把未读数一并说清（R-01-026/AC-10）：完成色点的未读提示是纯视觉通道，
-			// 读屏用户只能从这里取得「还有几条完成提醒没看」。为 0 时不追加，避免噪声。
+			// 文字通道承担颜色之外的全部信息：完成色点的未读提示是纯视觉通道，读屏用户只能
+			// 从这里取得「还有几条完成提醒没看」（R-01-026/AC-10）；全部读过时明说「已全部读」
+			// （R-01-026/AC-16），于是「点为什么是灰的」也有文字依据；没有完成提醒时不追加后缀。
 			const label = "运行中 " + counts.running + "，需要交互 " + counts.interaction + "，已完成 " + counts.completed
-				+ (counts.completedUnread > 0 ? "（" + counts.completedUnread + " 个未读）" : "");
-			const dots = [["running", counts.running], ["interaction", counts.interaction], ["completed", counts.completed]];
+				+ (counts.completedUnread > 0
+					? "（" + counts.completedUnread + " 个未读）"
+					: counts.completed > 0 ? "（已全部读）" : "");
+			// 三枚点的点亮判据：运行中/需要交互按各自计数；已完成按**未读**完成提醒数——
+			// 全部已读即与计数为 0 同款置灰（R-01-026/AC-16），不再出现「都读过了却仍亮绿」。
+			const dots = [["running", counts.running > 0], ["interaction", counts.interaction > 0], ["completed", counts.completedUnread > 0]];
 			// 鼠标与键盘路径统一由「宿主行按钮上的原生 click 监听」承载（见组件内的
 			// useEffect）：宿主把整行绑成了 selectPanel(id)，React 18 的合成事件委托在
 			// 根容器上，故在行按钮自身（冒泡早于根容器）拦下并 stopPropagation，宿主
@@ -5642,7 +5651,7 @@ function apply(ctx) {
 					// 全部已读即摘除，回到普通置灰/点亮的静态色点。
 					"data-badge-unread": counts.completedUnread > 0 ? "true" : undefined,
 				},
-				dots.map(([tone, value]) => react.createElement("i", { key: tone, "data-tone": tone, "data-on": value > 0 ? "true" : "false" })),
+				dots.map(([tone, on]) => react.createElement("i", { key: tone, "data-tone": tone, "data-on": on ? "true" : "false" })),
 			);
 		};
 	}

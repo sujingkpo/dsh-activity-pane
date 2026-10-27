@@ -58,11 +58,14 @@ function glyphSnapshot(page) {
 		const glyph = document.querySelector(".dap-badge-glyph");
 		if (glyph === null) return null;
 		const ring = getComputedStyle(glyph, "::before");
+		const completedDot = glyph.querySelector('i[data-tone="completed"]');
 		return {
 			unread: glyph.getAttribute("data-badge-unread"),
 			ringContent: ring.content,
 			ringColor: ring.borderTopColor,
 			label: glyph.getAttribute("aria-label") ?? "",
+			// 「已完成」点的点亮判据是未读数（R-01-026/AC-16）：全部读过即与 0 计数同款置灰。
+			completedOn: completedDot === null ? null : completedDot.getAttribute("data-on"),
 		};
 	});
 }
@@ -255,6 +258,9 @@ export default async function doneReadState({ page, url, assert }) {
 	assert.equal(settledGlyph.ringContent, "none", "全部已读后提示环随之消失（R-01-026/AC-10、AC-13）");
 	// 属性摘除与提示环消失是同一件事的两面：环由该属性驱动，属性不在即无环。
 	assert.doesNotMatch(settledGlyph.label, /个未读/, `全部已读后无障碍名称不再报未读数（实测 ${settledGlyph.label}；R-01-026/AC-10）`);
+	// R-01-026/AC-16：全部已读后「已完成」点与计数为 0 同款置灰，文字通道明说「已全部读」。
+	assert.equal(settledGlyph.completedOn, "false", `全部已读后「已完成」点置灰（实测 data-on=${settledGlyph.completedOn}；R-01-026/AC-16）`);
+	assert.match(settledGlyph.label, /已完成 \d+（已全部读）/, `全部已读时无障碍名称明说「已全部读」（实测 ${settledGlyph.label}；R-01-026/AC-16）`);
 
 	// ---- 全部移入历史（R-01-026/AC-14）：两处段头各一枚入口，动作复用卡片的完成确认 ----
 	// 都读完了但完成提醒还在（上一段已证实 ack 未被触发），此刻两处入口都应可见。

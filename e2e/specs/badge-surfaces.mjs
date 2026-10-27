@@ -24,6 +24,12 @@ function badgeLabel(page) {
 	return page.evaluate(() => document.querySelector(".dap-badge-glyph")?.getAttribute("aria-label") ?? null);
 }
 
+/** 从角标文案取未读完成数（「（n 个未读）」括号里的数字）；无该后缀返回 0。 */
+function unreadOf(label) {
+	const match = /（(\d+) 个未读）/.exec(String(label ?? ""));
+	return match === null ? 0 : Number(match[1]);
+}
+
 /** 从角标文案取「已完成」计数；取不到返回 -1。 */
 function completedOf(label, tone = "已完成") {
 	const match = new RegExp(`${tone}\\s*(\\d+)`).exec(String(label ?? ""));
@@ -43,7 +49,7 @@ export default async function badgeSurfaces({ browser, page, url, assert }) {
 
 	// ---- AC-01：三状态角标结构、无障碍名称与悬停提示 ----
 	// 未读完成提醒存在时（R-01-026/AC-10）无障碍名称在后追加「（n 个未读）」，为 0 时不追加。
-	assert.match(initial, /^运行中 \d+，需要交互 \d+，已完成 \d+(（\d+ 个未读）)?$/, `角标无障碍名称给出三状态计数（实测 ${initial}）`);
+	assert.match(initial, /^运行中 \d+，需要交互 \d+，已完成 \d+(（\d+ 个未读）|（已全部读）)?$/, `角标无障碍名称给出三状态计数与已读口径（实测 ${initial}）`);
 	const a11y = await page.evaluate(() => {
 		const glyph = document.querySelector(".dap-badge-glyph");
 		return {
@@ -57,10 +63,14 @@ export default async function badgeSurfaces({ browser, page, url, assert }) {
 		};
 	});
 	assert.equal(a11y.title, initial, "角标悬停提示与无障碍名称同源（R-01-026/AC-01）");
-	// R-01-026/AC-01：三枚点各自的数据开关与三类计数一一对应（计数为 0 的点置灰不隐藏）。
+	// R-01-026/AC-01：三枚点各自的数据开关与三类呈现口径一一对应（计数为 0 的点置灰不隐藏）。
+	// R-01-026/AC-16：「已完成」点按**未读**完成提醒数点亮，全部已读即与 0 计数同款置灰。
 	const labels = { running: "运行中", interaction: "需要交互", completed: "已完成" };
 	for (const dot of a11y.dots) {
-		assert.equal(dot.on, completedOf(initial, labels[dot.tone]) > 0, `「${dot.tone}」点的点亮状态与该类计数一致（R-01-026/AC-01）`);
+		// 运行中/需要交互按各自计数点亮；「已完成」按未读数点亮——全部已读时虽然计数大于 0
+		// 也置灰（R-01-026/AC-16），点亮本身即代表「还有没看过的完成提醒」。
+		const expectedOn = dot.tone === "completed" ? unreadOf(initial) > 0 : completedOf(initial, labels[dot.tone]) > 0;
+		assert.equal(dot.on, expectedOn, `「${dot.tone}」点的点亮状态与该类呈现口径一致（R-01-026/AC-01、AC-16）`);
 	}
 	assert.deepEqual(a11y.tones, ["running", "interaction", "completed"], "角标由三枚状态点构成（R-01-026/AC-01）");
 	assert.equal(a11y.rowLabel, "活动会话", `角标挂在宿主「活动会话」入口行的行按钮内（实测 rowLabel=${a11y.rowLabel}）`);

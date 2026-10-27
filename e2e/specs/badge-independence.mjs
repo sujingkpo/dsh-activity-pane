@@ -17,6 +17,12 @@ function badgeLabel(page) {
 	return page.evaluate(() => document.querySelector(".dap-badge-glyph")?.getAttribute("aria-label") ?? null);
 }
 
+/** 从角标文案解析未读完成数（「（n 个未读）」括号里的数字）；无该后缀返回 0。 */
+function unreadOf(label) {
+	const match = /（(\d+) 个未读）/.exec(String(label ?? ""));
+	return match === null ? 0 : Number(match[1]);
+}
+
 /** 从角标文案解析某一类计数；解析不出返回 -1（判据不成立）。 */
 function countOf(label, tone) {
 	const pattern = new RegExp(`${tone}\\s*(\\d+)`);
@@ -53,7 +59,9 @@ export default async function badgeIndependence({ page, url, assert }) {
 	}))) ;
 	const labels = { running: "运行中", interaction: "需要交互", completed: "已完成" };
 	for (const dot of dots) {
-		assert.equal(dot.on, countOf(frozen, labels[dot.tone]) > 0, `「${dot.tone}」点的点亮状态与关栏时的该类计数一致（R-01-026/AC-01）`);
+		// 「已完成」点按未读完成数点亮（R-01-026/AC-16）：全部已读即置灰，与计数是否为 0 无关。
+		const expectedOn = dot.tone === "completed" ? unreadOf(frozen) > 0 : countOf(frozen, labels[dot.tone]) > 0;
+		assert.equal(dot.on, expectedOn, `「${dot.tone}」点的点亮状态与关栏时的该类呈现口径一致（R-01-026/AC-01、AC-16）`);
 	}
 	assert.ok(frozen !== null, "窗格卸载后角标入口行仍留在宿主侧栏（不随窗格消失）");
 	const beforeCompleted = countOf(frozen, "已完成");
