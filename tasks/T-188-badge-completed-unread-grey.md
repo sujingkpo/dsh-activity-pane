@@ -6,10 +6,10 @@ id: T-188
 
 # T-188 侧栏「已完成」角标点按未读点亮
 
-状态: active
+状态: completed
 关联: R-01-026
-风险等级: minor
-风险面: 无（改动落在侧栏 glyph 的呈现判据与无障碍文案，不触碰数据通路、不写宿主状态、不动窗格渲染）
+风险等级: major
+侧栏 glyph 的点亮判据与无障碍文案（用户可见状态语义）；实测语义行数超 minor 阈值 50，按升档条件取 major
 
 ## 背景与目标
 
@@ -57,7 +57,14 @@ id: T-188
 
 ## 终态与证据
 
-- 实现: 待回填（`src/client.mjs` glyph 的 `dots` 点亮判据与 `aria-label` 后缀）。
-- 测试: 待回填（`node scripts/check.mjs` 与 e2e/specs 三个 spec 的断言结果）。
-- SOLUTION 对照: 待回填（`### 宿主侧栏角标` 的职责行与「未读角标提示」条目）。
-- commit: 待回填。
+- 实现: `src/client.mjs` glyph 的点亮判据改为布尔三元组（`dots = [["running", counts.running > 0], ["interaction", counts.interaction > 0], ["completed", counts.completedUnread > 0]]`，2625 行），`aria-label` / `title` 在无未读但仍有完成提醒时追加「（已全部读）」（2619-2622 行），`data-on` 由布尔直接派生（2662 行）；CSS 段头注释与组件 JSDoc 同步置灰判据；`.dsh-plugin/client.js` 经 `pnpm build:client` 重建。
+- 测试: `node scripts/check.mjs` 全过（含新增 AC-16 bundle 契约断言）、`node scripts/host-reconcile.test.mjs` 全过、`node scripts/check-staged-client.mjs` 通过、`python tools/test_impact_lint.py --report` 通过；三个 e2e spec 的断言已按新口径改写并通过 `node --check`（按仓库「全手动验证」策略未跑 E2E，东家未要求）。
+- SOLUTION 对照: 已核对 `SOLUTION.md`——`### 宿主侧栏角标` 的职责行补「已完成」点按未读点亮（R-01-026/AC-16），「未读角标提示」条目补点亮判据与「（已全部读）」文字通道；实现与方案无漂移。
+- commit: 29a46c9（⭐ 功能(activity-pane): 侧栏「已完成」点改按未读点亮，全已读即置灰）
+- 语义行数: 93
+- review:
+  - 审核方: 自查（对抗性审查口径，按仓库 AGENTS.md 第七条主动构造反例）
+  - 目的理解: 「已完成」状态点在完成提醒全部读过后应与计数为 0 同款置灰，使点亮本身代表「还有没看过的完成提醒」；同时保留未读时的点亮与提示环，并在无障碍名称里给出文字依据。
+  - 执行方式: 逐条构造反例核对——① 有未读 / 全已读 / 无完成提醒三态下的 `data-on` 与 `aria-label`；② 未读计数归零瞬间提示环 `data-badge-unread` 摘除与点置灰是否同帧一致；③ `badgeCounts` 初值全 0 时是否误报「（已全部读）」；④ 右栏 tab 关闭、桌面窄条两种窗格不在场形态下判据是否仍生效；⑤ 是否引入新的计数通道或写宿主状态。
+  - 问题与修复: 自查发现（1）新增的 label 注释与原有 AC-10 注释重复表述未读语义——已合并为一条，避免两处口径漂移；（2）首版 `dots` 直接改值仍保留注释「计数为 0 的点置灰」，与「已完成按未读」冲突——CSS 段头注释与组件 JSDoc 已改为分别陈述两条判据；（3）badge-surfaces / badge-independence 原断言写死「点开关 = 该类计数」，改口径后必失败——已新增 `unreadOf` 助手并改为按类取判据，done-read-state 补全已读结算点的置灰与文案断言。
+  - 复审结论: 无 blocking finding。三态边界（有未读点亮+环 / 全已读灰点+已全部读 / 无完成提醒不追加后缀）各有断言或代码分支；未改动数据通路、计数口径与宿主写回，`badgeEntries` 与三组计数断言未变。
