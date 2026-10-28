@@ -3077,11 +3077,11 @@ const SETTINGS_NAMESPACE = "dsh-activity-pane";
 const DONE_CLASS = "dap-done";
 /** 「已完成」分区未读游标的 localStorage 持久化键：sessionId → 已读时的 lastTurnEnd。 */
 const DONE_READ_STORAGE_KEY = "dsh-activity-pane:done-read";
-/** 「新增」强调动画的时长（与 CSS 的 dap-badge-hit 0.9s x2 次对齐）：到期摘除属性，
- *  使下一次新增能重新触发同一段动画。 */
-const BADGE_HIT_MS = 3800;
-/** 「需要交互」新增的强调时长（CSS 0.8s × 4 次）：与 BADGE_HIT_MS 同口径。 */
-const BADGE_ALERT_HIT_MS = 3600;
+/** 「新增」强调动画的时长（与 CSS 的 dap-badge-hop 0.75s × 4 拍对齐，留一帧余量）：
+ *  到期摘除属性，使下一次新增能重新触发同一段动画。 */
+const BADGE_HIT_MS = 3300;
+/** 「需要交互」新增的强调时长（CSS dap-badge-hop-alert 0.65s × 4 拍）：与 BADGE_HIT_MS 同口径。 */
+const BADGE_ALERT_HIT_MS = 2900;
 /** 迁移后焦点让位定位的有效期（ms）：窗内每次渲染都把焦点卡滚回视口，
  *  覆盖异步详情到达引起的卡片高度变化；超窗即止，不无界追随。 */
 const FOCUS_HANDOFF_MS = 800;
@@ -3148,83 +3148,73 @@ const CSS = `
 .dap-badge-glyph i[data-tone="running"][data-on="true"] { background: #65a0ff; }
 .dap-badge-glyph i[data-tone="interaction"][data-on="true"] { background: #d8a12a; }
 .dap-badge-glyph i[data-tone="completed"][data-on="true"] { background: #3fbf7f; }
-/* 「需要交互」持续强调（R-01-026/AC-08）：只要还有待处理的交互（计数 > 0），角标就一直
-   金色呼吸并向外扩环，直到该计数归零（用户处理完成）。待处理项要求用户立刻行动，一次性
-   提示到点即灭会让仍未处理的交互重新静默下去，所以这里用无界动画。
-   与「新增」一次性强调（data-badge-hit / data-badge-alert，见下）共用 filter/transform：
-   后者在源码中位于本节之后，属性同现时按同权重后者胜出（alert 变体还多一个属性、
-   权重更高），故其播放期间自动接管本常闪；计时器收口摘属性后自然落回——不需要 JS 在
-   两边做互斥。 */
-.dap-badge-glyph[data-badge-awaiting] {
-  color: #ffca4a;
-  animation: dap-badge-await-pulse 1.6s ease-in-out infinite;
+/* ---- 角标动效（R-01-026/AC-08、AC-10、AC-17）：三态各用不同通道，全部不使用边框环 ----
+  东家 2026-10-28 选型：一次性新增强调走「弹跳（压扁-拉长）」，未读走「完成点慢呼吸」，
+  「需要交互」走「三点金色跑马」。原先三处各自套了一圈 border 环（::before 绿环、::after
+  金环与白环），环在 18px 字形盒里读不出「一圈光」而更像一条线，故全部改为纯变换/阴影通道。 */
+/* 「需要交互」持续强调（R-01-026/AC-08、AC-17）：只要还有待处理的交互（计数 > 0），三枚点
+   就错开 0.18s 依次放大提亮，形成循环追逐，直到该计数归零（用户处理完成）。只有已点亮的
+   点参与追逐——置灰的点跟着跑会让人误以为那一类也有东西；置灰判据仍按各自计数（已完成按未读数）。
+   待处理项要求用户立刻行动，一次性提示到点即灭会让仍未处理的交互重新静默下去，所以用无界动画。
+   节奏 1.5s，快于未读完成点的 2.4s 慢呼吸——两条动效靠节奏区分，不靠有无动效区分。
+   常驻动效挂在三枚点自身、一次性强调挂在 glyph 盒上，两者属性不同层；为使「新来了一条」
+   不与常驻追逐叠成噪声，源码后段的 [data-badge-hit] i[data-tone] { animation: none; }
+   在强调播放期间暂停点动效，收口摘属性后自然恢复——仍不需要 JS 在两边做互斥。 */
+.dap-badge-glyph[data-badge-awaiting] { color: #ffca4a; }
+.dap-badge-glyph[data-badge-awaiting] i[data-on="true"] { animation: dap-badge-await-chase 1.5s ease-in-out infinite; }
+.dap-badge-glyph[data-badge-awaiting] i:nth-child(1) { animation-delay: 0s; }
+.dap-badge-glyph[data-badge-awaiting] i:nth-child(2) { animation-delay: 0.18s; }
+.dap-badge-glyph[data-badge-awaiting] i:nth-child(3) { animation-delay: 0.36s; }
+@keyframes dap-badge-await-chase {
+  0%, 100% { transform: scale(1); filter: brightness(1); }
+  40% { transform: scale(1.9); filter: brightness(2.4); }
 }
-@keyframes dap-badge-await-pulse {
-  0%, 100% { filter: brightness(1); transform: scale(1); }
-  50% { filter: brightness(1.9); transform: scale(1.28); }
+/* 完成提醒未读提示（R-01-026/AC-10、AC-12、AC-17）：还有未读完成项时，完成色点以 2.4s
+   周期慢呼吸（放大 1.2→1.7 倍 + 提亮），用节奏本身表达「有东西等你看」。慢于「需要交互」
+   的 1.5s 跑马，两条常驻动效不会互相盖住；全部已读即摘属性，呼吸随之停止、点回到置灰。
+   动效只在完成点自身，不套任何外环——18px 盒里的环读起来是一条线，不是一个光晕。 */
+.dap-badge-glyph[data-badge-unread] i[data-tone="completed"] { animation: dap-badge-done-breathe 2.4s ease-in-out infinite; }
+@keyframes dap-badge-done-breathe {
+  0%, 100% { transform: scale(1.2); filter: brightness(1.15); }
+  50% { transform: scale(1.7); filter: brightness(2.1); }
 }
-.dap-badge-glyph[data-badge-awaiting]::after {
-  content: "";
-  position: absolute;
-  inset: -3px;
-  border-radius: 999px;
-  pointer-events: none;
-  border: 2px solid currentColor;
-  animation: dap-badge-halo 1.6s ease-out infinite;
-}
-/* 完成提醒未读提示（R-01-026/AC-10、AC-12）：还有未读完成项时，整个 glyph 外圈套一层
-   绿色提示环——与窗格「已完成」分区的未读标识同色同源（#3fbf7f）。静态不闪：未读是
-   「有东西等你看」的持续状态，闪动通道留给要求立即行动的「需要交互」，两者不叠成噪声。
-   环用 ::before（::after 已被常闪与一次性强调占用）；全部已读即摘属性，环随之消失。 */
-.dap-badge-glyph[data-badge-unread]::before {
-  content: "";
-  position: absolute;
-  inset: -1px;
-  border-radius: 999px;
-  pointer-events: none;
-  border: 1.5px solid #3fbf7f;
-}
+/* 两态同现时的优先级（R-01-026/AC-17）：「需要交互」要求立刻行动，紧迫度高过「未读」——
+   同一枚 glyph 上两者同时成立时，完成点也并入跑马队列（沿用第三位的 0.36s 延迟），不在
+   同一组点上同时跑 1.5s 追逐与 2.4s 呼吸两套节奏。选择器与未读规则同特异性，靠位置在后胜出。 */
+.dap-badge-glyph[data-badge-awaiting] i[data-tone="completed"][data-on="true"] { animation: dap-badge-await-chase 1.5s ease-in-out 0.36s infinite; }
+/* 并入跑马后，未读的完成点不再有慢呼吸可用，改用一枚常驻绿色柔光区分「这枚是未读的完成」——
+   阴影画光、不画线，与「不新增边框」的取向一致；全部已读时该点置灰、柔光随之消失。 */
+.dap-badge-glyph[data-badge-awaiting][data-badge-unread] i[data-tone="completed"] { box-shadow: 0 0 4px 1.5px rgba(63, 191, 127, 0.75); }
 @media (prefers-reduced-motion: reduce) {
-  /* 「需要交互」常闪只关动效、保留金色状态色：状态反馈不能随动效一起消失
-     （与等待胶囊 dap-await-pulse 同一条口径）。 */
-  .dap-badge-glyph[data-badge-awaiting],
-  .dap-badge-glyph[data-badge-awaiting]::after { animation: none; }
+  /* 降低动效偏好下只关动效、不关状态：金色与「未读点比已读点更大更亮」必须保留，
+     否则状态反馈会随动效一起消失（与等待胶囊 dap-await-pulse 同一条口径）。 */
+  .dap-badge-glyph[data-badge-awaiting] i,
+  .dap-badge-glyph[data-badge-unread] i[data-tone="completed"] { animation: none; }
+  .dap-badge-glyph[data-badge-unread] i[data-tone="completed"] { transform: scale(1.45); filter: brightness(1.62); }
 }
 /* 「新增」强调：计数增加的那一次播放一次，动画结束后由 JS 摘属性。
-   东家反馈「要明显」：改成 1.2s × 3 次的高对比强调——亮度拉到 2.4、放大到 1.45，
-   并在下方叠一圈放大淡出的光环（::after 只做视觉，不占布局）。
-   「需要交互」新增是最需要被看见的一类，另走更高对比的 dap-badge-hit-alert。 */
-.dap-badge-glyph[data-badge-hit] { animation: dap-badge-hit 1.2s ease-in-out 3; }
-@keyframes dap-badge-hit {
-  0%, 100% { filter: brightness(1); transform: scale(1); }
-  45% { filter: brightness(2.4); transform: scale(1.45); }
+   东家 2026-10-28 选型「弹跳」：先上跳并压扁-拉长再落地（squash & stretch），0.75s × 4 拍。
+   比单纯放大更像「有东西落进来了」，且完全不依赖额外绘制的圈层。 */
+.dap-badge-glyph[data-badge-hit] { animation: dap-badge-hop 0.75s cubic-bezier(0.28, 0.84, 0.42, 1) 4; }
+@keyframes dap-badge-hop {
+  0%, 100% { transform: translateY(0) scale(1, 1); }
+  22% { transform: translateY(-3px) scale(0.9, 1.18); }
+  46% { transform: translateY(0) scale(1.18, 0.88); }
+  64% { transform: translateY(-1.2px) scale(0.96, 1.08); }
 }
-/* 光环：实心圆环 + 放大淡出。用 border 而非径向渐变——仓库有全局断言禁止
-   该渐变字面量（时间线圆点曾因硬停色渐变被否决，C-036/C-061~063）。 */
-.dap-badge-glyph[data-badge-hit]::after {
-  content: "";
-  position: absolute;
-  inset: -3px;
-  border-radius: 999px;
-  pointer-events: none;
-  border: 2px solid currentColor;
-  animation: dap-badge-halo 1.2s ease-out 3;
+/* 「需要交互」新增：金色 + 更大的形变 + 更快的一轮，与运行中/已完成区分开。 */
+.dap-badge-glyph[data-badge-hit][data-badge-alert] { animation: dap-badge-hop-alert 0.65s cubic-bezier(0.28, 0.84, 0.42, 1) 4; color: #ffca4a; }
+@keyframes dap-badge-hop-alert {
+  0%, 100% { transform: translateY(0) scale(1, 1); filter: brightness(1); }
+  24% { transform: translateY(-4px) scale(0.86, 1.26); filter: brightness(2.6); }
+  48% { transform: translateY(0) scale(1.26, 0.84); filter: brightness(1.3); }
+  68% { transform: translateY(-1.6px) scale(0.94, 1.12); filter: brightness(1.9); }
 }
-@keyframes dap-badge-halo {
-  0% { opacity: 0.9; transform: scale(0.7); }
-  100% { opacity: 0; transform: scale(2.1); }
-}
-/* 「需要交互」新增：金色高对比 + 更快的一轮，与运行中/已完成区分开。 */
-.dap-badge-glyph[data-badge-hit][data-badge-alert] { animation: dap-badge-hit-alert 0.8s ease-in-out 4; color: #ffca4a; }
-@keyframes dap-badge-hit-alert {
-  0%, 100% { filter: brightness(1); transform: scale(1); }
-  50% { filter: brightness(2.8); transform: scale(1.6); }
-}
-.dap-badge-glyph[data-badge-hit][data-badge-alert]::after { animation: dap-badge-halo 0.8s ease-out 4; }
-/* 按「哪一类在涨」给光环上色：运行中蓝、需要交互金、已完成绿。
-   色相对齐三枚状态点，用户不看角标也能从光环颜色判断新增来源。 */
-.dap-badge-glyph[data-badge-hit][data-badge-bump="running"] { color: #65a0ff; }
-.dap-badge-glyph[data-badge-hit][data-badge-bump="completed"] { color: #3fbf7f; }
+/* 一次性强调（data-badge-hit）播放期间接管常驻点动效：两者都改点的 transform，
+   同现会叠成噪声（30 秒一次的跳 + 一直在跑的追逐/呼吸同时出现）。这条规则与未读点的
+   规则同为「两属性 + 一类型」权重，靠源码位置在后胜出；摘属性后常驻动效自然恢复。 */
+.dap-badge-glyph[data-badge-hit] i[data-tone] { animation: none; }
+
 /* 角标面板正文：三组明细，与窗格卡片同一视觉语言。 */
 .dap-badge-panel { display: flex; flex-direction: column; gap: 12px; padding: 16px; overflow: auto; }
 .dap-badge-group { display: flex; flex-direction: column; gap: 6px; }

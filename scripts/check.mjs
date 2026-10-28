@@ -5264,11 +5264,29 @@ assert.ok(
 		syncReadBody.includes("if (!linkedCurrentSeen) {"),
 	"工作区侧栏点击会话即已读：只推进本地已读游标，首帧只登记基线、不写宿主确认账本（R-01-026/AC-15）",
 );
-// R-01-026/AC-10：侧栏 glyph 的完成色点带未读提示环，全部已读即摘除。
+// R-01-026/AC-17 与 R-01-026/AC-10：侧栏 glyph 的「未读完成」不再套边框环，改为完成色点自身 2.4s 慢呼吸；
+// 属性由未读完成数驱动，全部已读即摘除，点回到置灰。
 assert.ok(
 	clientSource.includes('"data-badge-unread": counts.completedUnread > 0 ? "true" : undefined') &&
-		bundle.includes(".dap-badge-glyph[data-badge-unread]::before"),
-	"侧栏角标按未读完成数给出提示环、归零即摘（R-01-026/AC-10、AC-12）",
+		bundle.includes('.dap-badge-glyph[data-badge-unread] i[data-tone="completed"] { animation: dap-badge-done-breathe 2.4s ease-in-out infinite; }') &&
+		!bundle.includes(".dap-badge-glyph[data-badge-unread]::before"),
+	"侧栏角标按未读完成数给出提示：完成点慢呼吸、归零即摘，且不再套边框环（R-01-026/AC-10、AC-12、AC-17）",
+);
+// R-01-026/AC-17 与 R-01-026/AC-08：三条动效分别走独立通道，全部不使用 border 环，且互不叠成噪声——
+// 一次性强调（glyph 盒上的弹跳）播放期间暂停点自身的常驻动效；降低动效偏好下只停动画、保留状态。
+assert.ok(
+		bundle.includes('.dap-badge-glyph[data-badge-awaiting] i[data-on="true"] { animation: dap-badge-await-chase 1.5s ease-in-out infinite; }') &&
+		bundle.includes("@keyframes dap-badge-await-chase {") &&
+		bundle.includes("@keyframes dap-badge-hop {") &&
+		bundle.includes(".dap-badge-glyph[data-badge-hit] { animation: dap-badge-hop 0.75s cubic-bezier(0.28, 0.84, 0.42, 1) 4; }") &&
+		bundle.includes(".dap-badge-glyph[data-badge-hit] i[data-tone] { animation: none; }") &&
+		bundle.includes('.dap-badge-glyph[data-badge-awaiting] i[data-tone="completed"][data-on="true"] { animation: dap-badge-await-chase 1.5s ease-in-out 0.36s infinite; }') &&
+		bundle.includes('.dap-badge-glyph[data-badge-awaiting][data-badge-unread] i[data-tone="completed"] { box-shadow: 0 0 4px 1.5px rgba(63, 191, 127, 0.75); }') &&
+		bundle.includes("@keyframes dap-badge-hop-alert {") &&
+		!bundle.includes("dap-badge-halo") &&
+		!bundle.includes(".dap-badge-glyph[data-badge-awaiting]::after") &&
+		!bundle.includes(".dap-badge-glyph[data-badge-hit]::after"),
+	"角标三态动效（弹跳 / 完成点慢呼吸 / 三点金色跑马）互不叠噪声，且不再使用任何边框环（R-01-026/AC-08、AC-17）",
 );
 // R-01-026/AC-16：`已完成` 点的点亮判据是**未读完成数**，不是计数——全部已读即与计数为 0
 // 同款置灰，点亮本身代表「还有没看过的完成提醒」；文字通道同时明说「（已全部读）」。

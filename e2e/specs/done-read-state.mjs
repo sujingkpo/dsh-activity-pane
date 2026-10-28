@@ -7,7 +7,7 @@
 //   3) 侧栏角标弹窗的「已完成」组同样带未读标识（状态文本「未读 / 已读」+ 行 data-unread），
 //      运行中/需要交互两组不带；从弹窗点进会话与点窗格卡片是同一次「我看过了」，
 //      两条路径写同一份已读游标；
-//   4) 侧栏 glyph 按未读完成数带提示环（data-badge-unread + 绿色 ::before 环），全部已读即摘。
+//   4) 侧栏 glyph 按未读完成数给出提示（data-badge-unread → 完成点 2.4s 慢呼吸），全部已读即摘、动画停止。
 // 判据全部取自用户可观察呈现（计算样式、属性、文案），不依赖实现内部结构。
 // 找卡一律用 data-wait / data-unread 结构选择器：宿主会用 LLM 回复改写会话标题。
 
@@ -52,17 +52,17 @@ function doneCardSnapshot(page, index = 0) {
 	}, index);
 }
 
-/** 角标 glyph 的未读提示环与无障碍读数。 */
+/** 角标 glyph 的未读提示（完成点慢呼吸）与无障碍读数。 */
 function glyphSnapshot(page) {
 	return page.evaluate(() => {
 		const glyph = document.querySelector(".dap-badge-glyph");
 		if (glyph === null) return null;
-		const ring = getComputedStyle(glyph, "::before");
 		const completedDot = glyph.querySelector('i[data-tone="completed"]');
+		const completedStyle = completedDot === null ? null : getComputedStyle(completedDot);
 		return {
 			unread: glyph.getAttribute("data-badge-unread"),
-			ringContent: ring.content,
-			ringColor: ring.borderTopColor,
+		// 未读提示不再是外圈边框环，而是完成色点自身的慢呼吸（R-01-026/AC-17）。
+			animationName: completedStyle === null ? null : completedStyle.animationName,
 			label: glyph.getAttribute("aria-label") ?? "",
 			// 「已完成」点的点亮判据是未读数（R-01-026/AC-16）：全部读过即与 0 计数同款置灰。
 			completedOn: completedDot === null ? null : completedDot.getAttribute("data-on"),
@@ -170,9 +170,9 @@ export default async function doneReadState({ page, url, assert }) {
 
 	// 从弹窗点进未读条目同样是「我看过了」：关掉弹窗重开后该条目转为已读。
 	const beforeClick = await glyphSnapshot(page);
-	assert.equal(beforeClick.unread, "true", "仍有未读完成提醒时角标带未读提示环（R-01-026/AC-10、AC-12）");
+	assert.equal(beforeClick.unread, "true", "仍有未读完成提醒时角标挂未读提示（R-01-026/AC-10、AC-12）");
 	assert.match(beforeClick.label, /（\d+ 个未读）/, "角标读数含未读完成数（R-01-026/AC-10）");
-	assert.equal(beforeClick.ringColor, "rgb(63, 191, 127)", `未读提示环为完成提醒同源绿色（实测 ${beforeClick.ringColor}；R-01-026/AC-10）`);
+	assert.equal(beforeClick.animationName, "dap-badge-done-breathe", `未读时完成点自身以慢呼吸呈现未读提示（实测 ${beforeClick.animationName}；R-01-026/AC-10、AC-17）`);
 	assert.match(beforeClick.label, /已完成 \d+（\d+ 个未读）/, `角标无障碍名称给出未读数（实测 ${beforeClick.label}；R-01-026/AC-10）`);
 	await page.locator('.dap-modal-group[data-tone="completed"] .dap-modal-item[data-unread]').first().click();
 	await until("弹窗条目激活后关闭弹窗", async () => ((await page.locator(".dap-modal").isVisible()) ? null : true));
@@ -251,12 +251,12 @@ export default async function doneReadState({ page, url, assert }) {
 		paneAfterReadAll.total,
 		"一键已读不解除完成提醒：「移入历史」按钮仍在（R-01-026/AC-13）",
 	);
-	const settledGlyph = await until("全部已读后角标摘除未读提示环", async () => {
+	const settledGlyph = await until("全部已读后角标摘除未读提示", async () => {
 		const snapshot = await glyphSnapshot(page);
 		return snapshot?.unread === null ? snapshot : null;
 	}, 10_000);
-	assert.equal(settledGlyph.ringContent, "none", "全部已读后提示环随之消失（R-01-026/AC-10、AC-13）");
-	// 属性摘除与提示环消失是同一件事的两面：环由该属性驱动，属性不在即无环。
+	assert.equal(settledGlyph.animationName, "none", `全部已读后完成点慢呼吸随之停止（实测 ${settledGlyph.animationName}；R-01-026/AC-10、AC-17）`);
+	// 属性摘除与动效停止是同一件事的两面：慢呼吸由该属性驱动，属性不在即无动画。
 	assert.doesNotMatch(settledGlyph.label, /个未读/, `全部已读后无障碍名称不再报未读数（实测 ${settledGlyph.label}；R-01-026/AC-10）`);
 	// R-01-026/AC-16：全部已读后「已完成」点与计数为 0 同款置灰，文字通道明说「已全部读」。
 	assert.equal(settledGlyph.completedOn, "false", `全部已读后「已完成」点置灰（实测 data-on=${settledGlyph.completedOn}；R-01-026/AC-16）`);
