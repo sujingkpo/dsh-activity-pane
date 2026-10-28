@@ -6,7 +6,7 @@ id: T-189
 
 # T-189 侧栏角标三态动效改为无边框通道
 
-状态: active
+状态: completed
 关联: R-01-026
 风险等级: major
 风险面: 侧栏 glyph 的用户可见动效语义（三态区分与降低动效回退）；实测语义行数超 minor 阈值 50，按升档条件取 major
@@ -84,4 +84,11 @@ id: T-189
   - `.dsh-plugin/client.js` 经 `pnpm build:client` 重建。
 - 测试: `node scripts/check.mjs` 全过（含新增 AC-17 两组契约断言）、`node scripts/check-staged-client.mjs` 通过、`python tools/test_impact_lint.py --report` 通过；`e2e/specs/done-read-state.mjs` 快照改取完成点 `animationName` 并通过 `node --check`（按仓库「全手动验证」策略未跑 E2E，东家未要求）。
 - SOLUTION 对照: 已核对 `SOLUTION.md` 的 `### 宿主侧栏角标`——职责行补 AC-17、未读提示条目由边框环改写为完成点慢呼吸、「需要交互」条目改写为三点跑马、新增一次性强调条目（弹跳 + 收口常量 + bump 色相）；实现与方案无漂移。
-- 待办: 提交后回填 commit 哈希与语义行数实测值。
+- commit: 8229ce2（⭐ 功能(activity-pane): 角标三态动效改为弹跳/慢呼吸/金色跑马，去掉全部边框环）
+- 语义行数: 198
+- review:
+  - 审核方: 自查（对抗性审查口径，按仓库 AGENTS.md 第七条主动构造反例）
+  - 目的理解: 侧栏角标的三类提醒不再靠边框环表达，改用三条互不相同的动效通道——新增用弹跳、未读用完成点慢呼吸、需要交互用三点金色跑马，且三者在同场时不能互相盖住或叠成噪声。
+  - 执行方式: 在浏览器里对真实 bundle 的角标 CSS 段逐项取计算样式核对（`animationName`/`animationDelay`/`borderTopWidth`/`content`），并单独验证三种组合态：仅未读、仅需要交互、两者同现；再复现降效声明验证状态不随动效消失。
+  - 问题与修复: 自查发现四处问题。(1) 首版把常驻动效挂在 glyph 盒上，与一次性强调的 transform 同层相撞——改为挂在三枚点自身。(2) 跑马对置灰的点也生效，会让人误以为那一类也有东西——改为只作用于 `data-on="true"`。(3) 两态同现时完成点同时命中跑马与慢呼吸两条同特异性规则、胜负取决于源码顺序，且两组节奏会撞——显式补 `[data-badge-awaiting] i[data-tone="completed"][data-on="true"]` 让跑马接管，并给未读完成点加一枚 `box-shadow` 绿色柔光保留「这枚仍未读」。(4) CSS 注释里写了反引号，提前终止了外层模板字符串导致 bundle 语法错误被 check 拦下——注释改为无引号写法。
+  - 复审结论: 无 blocking finding。三态单现、两态同现、降效回退、强调期间的抑制四条路径均有计算样式证据；未改动计数口径、通知通道与宿主写回，AC-16 的点亮判据与文案断言保持原样通过。
