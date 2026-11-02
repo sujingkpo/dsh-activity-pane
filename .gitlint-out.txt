@@ -1,0 +1,83 @@
+agentmap lint warnings:
+  - PRD.md:17: long noun stack; connect the nouns or split the phrase into a sub-list
+  - PRD.md:31: long noun stack; connect the nouns or split the phrase into a sub-list
+  - PRD.md:79: long noun stack; connect the nouns or split the phrase into a sub-list
+  - PRD.md:104: long noun stack; connect the nouns or split the phrase into a sub-list
+  - PRD.md:108: list item may carry multiple rules; split so each line has one condition and one action
+  - PRD.md:113: vague wording "尽快"; state the exact condition, quantity, or modality
+  - PRD.md:114: long noun stack; connect the nouns or split the phrase into a sub-list
+  - PRD.md:115: long noun stack; connect the nouns or split the phrase into a sub-list
+  - PRD.md:116: long noun stack; connect the nouns or split the phrase into a sub-list
+  - PRD.md:119: long noun stack; connect the nouns or split the phrase into a sub-list
+  - PRD.md:121: list item may carry multiple rules; split so each line has one condition and one action
+  - PRD.md:122: list item may carry multiple rules; split so each line has one condition and one action
+  - PRD.md:126: long noun stack; connect the nouns or split the phrase into a sub-list
+  - PRD.md:127: long noun stack; connect the nouns or split the phrase into a sub-list
+  - PRD.md:140: long noun stack; connect the nouns or split the phrase into a sub-list
+  - PRD.md:141: vague wording "尽量"; state the exact condition, quantity, or modality
+  - PRD.md:144: long noun stack; connect the nouns or split the phrase into a sub-list
+  - PRD.md:158: long noun stack; connect the nouns or split the phrase into a sub-list
+  - PRD.md:160: long noun stack; connect the nouns or split the phrase into a sub-list
+  - PRD.md:200: long noun stack; connect the nouns or split the phrase into a sub-list
+  - PRD.md:205: long noun stack; connect the nouns or split the phrase into a sub-list
+  - PRD.md:206: list item may carry multiple rules; split so each line has one condition and one action
+  - PRD.md:209: long noun stack; connect the nouns or split the phrase into a sub-list
+  - PRD.md:211: long noun stack; connect the nouns or split the phrase into a sub-list
+  - PRD.md:212: long noun stack; connect the nouns or split the phrase into a sub-list
+  - PRD.md:232: long noun stack; connect the nouns or split the phrase into a sub-list
+  - PRD.md:233: long noun stack; connect the nouns or split the phrase into a sub-list
+  - PRD.md:235: long noun stack; connect the nouns or split the phrase into a sub-list
+  - PRD.md:238: long noun stack; connect the nouns or split the phrase into a sub-list
+  - PRD.md:250: long noun stack; connect the nouns or split the phrase into a sub-list
+  - PRD.md:251: long noun stack; connect the nouns or split the phrase into a sub-list
+  - PRD.md:287: long noun stack; connect the nouns or split the phrase into a sub-list
+  - PRD.md:288: long noun stack; connect the nouns or split the phrase into a sub-list
+  - PRD.md:297: long noun stack; connect the nouns or split the phrase into a sub-list
+  - PRD.md:308: long noun stack; connect the nouns or split the phrase into a sub-list
+  - PRD.md:319: long noun stack; connect the nouns or split the phrase into a sub-list
+  - PRD.md:330: long noun stack; connect the nouns or split the phrase into a sub-list
+  - PRD.md:343: long noun stack; connect the nouns or split the phrase into a sub-list
+  - PRD.md:348: list item may carry multiple rules; split so each line has one condition and one action
+  - PRD.md:355: long noun stack; connect the nouns or split the phrase into a sub-list
+  - PRD.md:364: list item may carry multiple rules; split so each line has one condition and one action
+  - PRD.md:389: long noun stack; connect the nouns or split the phrase into a sub-list
+  - PRD.md:394: long noun stack; connect the nouns or split the phrase into a sub-list
+  - PRD.md:405: long noun stack; connect the nouns or split the phrase into a sub-list
+  - PRD.md:408: long noun stack; connect the nouns or split the phrase into a sub-list
+  - PRD.md:422: long noun stack; connect the nouns or split the phrase into a sub-list
+  - PRD.md:425: long noun stack; connect the nouns or split the phrase into a sub-list
+  - PRD.md:432: long noun stack; connect the nouns or split the phrase into a sub-list
+  - PRD.md:433: long noun stack; connect the nouns or split the phrase into a sub-list
+  - PRD.md:435: long noun stack; connect the nouns or split the phrase into a sub-list
+  - PRD.md:436: list item may carry multiple rules; split so each line has one condition and one action
+  - PRD.md:453: long noun stack; connect the nouns or split the phrase into a sub-list
+  - CONVENTIONS.md:33: long noun stack; connect the nouns or split the phrase into a sub-list
+  - tasks/T-182-*: 语义行数 declares 228, lint measures 183 (lint 以实测为准)
+  - tasks/T-184-*: 语义行数 declares 178, lint measures 138 (lint 以实测为准)
+  - tasks/T-185-*: 语义行数 declares 367, lint measures 152 (lint 以实测为准)
+  - commit 1812702 touches code without a T-ID reference or review: line; attach review: for 短路 changes
+  - commit 2548762 touches code without a T-ID reference or review: line; attach review: for 短路 changes
+  - commit 4ce78f7 touches code without a T-ID reference or review: line; attach review: for 短路 changes
+  - commit 9d63df2 touches code without a T-ID reference or review: line; attach review: for 短路 changes
+  - commit c854cb2 touches code without a T-ID reference or review: line; attach review: for 短路 changes
+  - commit eba080d touches code without a T-ID reference or review: line; attach review: for 短路 changes
+agentmap lint failed:
+  - tasks/T-176-20261015-badge-interaction-persistent-pulse.md: needs exactly one 风险等级: minor or major
+  - tasks/T-176-20261015-badge-interaction-persistent-pulse.md: missing evidence anchor src/client.mjs::animation: dap-badge-await-pulse 1.6s ease-in-out infinite;
+  - tasks/T-176-20261015-badge-interaction-persistent-pulse.md: missing evidence anchor src/client.mjs::.dap-badge-glyph[data-badge-awaiting],
+  - tasks/T-180-20261019-remove-verify-scripts.md: needs exactly one 风险等级: minor or major
+  - tasks/T-180-20261019-remove-verify-scripts.md: missing non-empty 差距评估
+  - tasks/T-180-20261019-remove-verify-scripts.md: missing non-empty 收敛方案
+  - tasks/T-180-20261019-remove-verify-scripts.md: missing non-empty 测试计划
+  - tasks/T-180-20261019-remove-verify-scripts.md: missing 验证矩阵
+  - tasks/T-180-20261019-remove-verify-scripts.md: 验证矩阵 must use 维度 | 适用性/理由 | 可执行证据 header
+  - tasks/T-180-20261019-remove-verify-scripts.md: 验证矩阵 missing baseline dimensions: 副作用, 异常, 成功, 边界配置
+  - 累计审计触发: 自复位点起 completed task 3>=10 或窗口语义行 174103>=800；先完成累计审计 task 并登记新复位点
+  - tasks/T-177-*: completed task needs 语义行数: <n> evidence
+  - tasks/T-178-*: completed task needs 语义行数: <n> evidence
+  - tasks/T-179-*: completed task needs 语义行数: <n> evidence
+  - tasks/T-181-*: completed task needs 语义行数: <n> evidence
+  - AGENTS.md: must match the canonical AgentMap runtime contract
+  - tools/agentmap_validate_commit_msg.py: must match the canonical AgentMap runtime contract
+  - .githooks/post-rewrite: must match the canonical AgentMap runtime contract
+  - tools/agentmap_rewrite_fix.py: must match the canonical AgentMap runtime contract
