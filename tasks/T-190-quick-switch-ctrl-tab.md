@@ -6,7 +6,7 @@ id: T-190
 
 # T-190 快捷会话切换（Ctrl+Tab 浮层）
 
-状态: active
+状态: completed
 关联: R-01-028
 风险等级: major
 风险面: 新增全局键盘热键（捕获期拦截 Ctrl+Tab）与跨会话跳转入口；实现外提到独立文件并改动构建脚本，实测语义行数超过 minor 阈值 50，按升档条件取 major
@@ -86,7 +86,8 @@ id: T-190
 - 实现: `src/core.mjs` 新增 `switchCandidates`；`src/quick-switch.mjs` 新建整套快捷切换（浮层、热键、候选发布、生命周期）；`src/client.mjs` 只保留样式并入、构造、publish、connect、dispose 五个接入点；`scripts/build-client.mjs` 拼入第四个源文件；`scripts/check-staged-client.mjs` 的 inputs 登记；`.dsh-plugin/client.js` 经 `pnpm build:client` 重建。
 - 测试: `node scripts/check.mjs` 全过（含新增 R-01-028 断言组）；`node --check .dsh-plugin/client.js` 通过。按仓库「全手动验证」策略未跑 E2E。
 - SOLUTION 对照: 已核对 `SOLUTION.md` 新增的 `### 快捷切换器`——职责、关键内部结构（零侵入、热键三段式、不抢焦点、候选单点派生、只读预览、行复用、生命周期）、代码位置与实现一致，实现与方案无漂移。
-- 语义行数: 见 git diff 统计（新增功能主体含注释与样式约 800 行，其中独立文件 `src/quick-switch.mjs` 约 430 行）
+- commit: 26f63aa（⭐ 功能(activity-pane): 新增 Ctrl+Tab 快捷会话切换浮层）
+- 语义行数: 907
 - review:
   - 审核方: 自查（对抗性审查口径，按仓库 AGENTS.md 第七条主动构造反例）
   - 目的理解: 用 Alt+Tab 的肌肉记忆在会话间跳转，且不占用、不改变宿主标题行的任何像素——这要求实现完全不进入宿主渲染树。
