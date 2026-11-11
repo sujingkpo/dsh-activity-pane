@@ -11,6 +11,7 @@ const inputs = [
 	"scripts/build-client.mjs",
 	"src/core.mjs",
 	"src/navigation.mjs",
+	"src/quick-switch.mjs",
 	"src/client.mjs",
 	".dsh-plugin/client.js",
 ];

@@ -95,6 +95,7 @@ const BADGE_ALERT_HIT_MS = 2900;
 /** 迁移后焦点让位定位的有效期（ms）：窗内每次渲染都把焦点卡滚回视口，
  *  覆盖异步详情到达引起的卡片高度变化；超窗即止，不无界追随。 */
 const FOCUS_HANDOFF_MS = 800;
+
 /** 宿主侧栏面板 id：同一 id 同时用于 sidebar.panellist 入口行与 main keyed 面板正文。 */
 const BADGE_PANEL_ID = "dsh-activity-pane";
 /** 宿主侧栏「活动会话」面板行/页面 id 与右栏 tab 的 kind 共用同一身份常量。 */
@@ -1913,6 +1914,7 @@ body:not([data-ds-dark-theme]) [data-dsh-activity-pane] .dap-repo:hover,
 body:not([data-ds-dark-theme]) [data-dsh-activity-pane] .dap-repo:focus-visible {
   background: var(--dsw-alias-bg-layer-3, #eceef1);
 }
+
 `;
 
 function getSnapshot(service, key) {
@@ -3003,6 +3005,29 @@ function apply(ctx) {
 		// 成对挂摘（不在 document 上拦点击——本仓库禁止，scripts/check.mjs 有断言）。
 	}
 
+	// ---- 快捷会话切换（新增功能，R-01-028）----
+	// 实现整体在 src/quick-switch.mjs（createQuickSwitch），此处只做依赖注入与生命周期
+	// 接线：上游合并改动 client.mjs 时不与实现段相邻冲突（C-108 后继）。热键与浮层口径
+	// 见该文件头注：候选取本帧既有派生结果，不为浮层发起任何日志读取（档位资源纪律，
+	// DOMAIN.md:127-131）；常态不占宿主任何槽位，标题行与面包屑零改变。
+	/** 快捷切换器实例（惰性构造）：依赖以取值器注入，不缓存服务引用。 */
+	let quickSwitch = null;
+
+	/** 取（或首次构造）快捷切换器实例。依赖全部现取：sessions 服务代际会变、
+	 *  sessionDetailsById 是本函数之后的 const（TDZ）、disposed 是可变状态。 */
+	function quickSwitchOf() {
+		if (quickSwitch !== null) return quickSwitch;
+		quickSwitch = createQuickSwitch({
+			getSessionDetails: () => sessionDetailsById,
+			isDisposed: () => disposed,
+			switchCandidates,
+			resolveWorkspaceColors,
+			makeEl,
+			openSessionFromBadge,
+		});
+		return quickSwitch;
+	}
+
 	/** 重读配置通道快照；快照缺失（服务未就绪/命名空间未服务）即回落下一级通道。 */
 	function syncHostConfigValue() {
 		try {
@@ -3146,6 +3171,9 @@ function apply(ctx) {
 	const style = document.createElement("style");
 	style.id = STYLE_ID;
 	style.textContent = CSS;
+	// 快捷会话切换器的样式单独维护在 src/quick-switch.mjs（R-01-028）：并入同一
+	// style 元素，卸载仍由既有 style.remove() 一次回收。
+	style.textContent += QUICK_SWITCH_CSS;
 	document.head.appendChild(style);
 
 	// 移动端浮动开关按钮（桌面隐藏见 CSS）：紧凑形骨架——仅计数徽标，无图标与
@@ -6670,6 +6698,15 @@ function apply(ctx) {
 		}
 		// 重试链目标已成为当前会话（他途到达）即取消，避免过期链条拽回会话。
 		cancelStaleOpenRetries({ currentId, activatedId: lastActivatedId });
+		// 快捷会话切换（R-01-028）：候选 = 活动条目里的主会话，分组沿用 buildEntries
+		// 的既有顺序；当前会话单列末组作为「取消」出口（选中即收起不跳转）。第二行
+		// 只读既有预览，不发起日志读取。当前会话标题取 mainTitle（与卡片同源）。
+		const quickSwitchCurrent = currentIdOf(snapshot);
+		quickSwitchOf().publish(
+			active,
+			quickSwitchCurrent,
+			quickSwitchCurrent === null ? "" : mainTitle(snapshot?.byId ?? {}, quickSwitchCurrent),
+		);
 		return { snapshot, listState, workspaceItems, active, activeRest, done, recent, now };
 	}
 
@@ -7297,6 +7334,9 @@ function apply(ctx) {
 		connectSidebarRight();
 		// 宿主侧栏三状态角标（入口行 + 面板正文）：同样软接线，services 缺席即跳过。
 		connectStatusBadges();
+		// 快捷会话切换（R-01-028）：常驻 Ctrl+Tab 热键 + 居中浮层，不占用宿主槽位；
+		// 软接线——热键注册失败不影响窗格既有呈现。
+		quickSwitchOf().connect();
 	} catch {
 		rightTabDisposer = null;
 		rightSlotDisposer = null;
@@ -7353,6 +7393,10 @@ function apply(ctx) {
 		badgeModalEl = null;
 		badgeModalGroups = null;
 		badgeModalReturnFocus = null;
+		// 快捷切换器回收：摘热键与窗口监听、移除浮层 DOM 与复用单元——实现见
+		// src/quick-switch.mjs。
+		quickSwitch?.dispose();
+		quickSwitch = null;
 		completeAcksById.clear();
 		busyById.clear();
 		busyRequestedIds.clear();

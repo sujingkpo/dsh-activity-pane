@@ -87,6 +87,7 @@ import {
 	shouldCancelOpenRetry,
 	subagentTitle,
 	summarizeToolArguments,
+	switchCandidates,
 	usageSummary,
 	workspaceHue,
 	WORKSPACE_COLOR_SLOTS,
@@ -5511,6 +5512,212 @@ assert.deepEqual(
 	buildRecent({ ids: [], byId: {} }, [], NOW, {}, [], errAcks("error", "boom")).map((e) => e.id),
 	[],
 	"会话已不在会话服务列表时历史区不产出条目（R-01-027/AC-01）",
+);
+
+
+// ---- R-01-028 快捷会话切换（C-108、C-109）----
+// 实现已外提到 src/quick-switch.mjs（依赖经 createQuickSwitch 注入），故本段对实现
+// 的断言一律读该文件；client.mjs 只保留接入点（P1-P5），单独断言。
+const quickSwitchSource = (await readFile(join(root, "src/quick-switch.mjs"), "utf8")).replace(/\r\n/g, "\n");
+
+// 候选口径的行为断言：只收 running/awaiting 主会话、排除当前会话、三分段且保序。
+const QS_RUN = { id: "qs-run", kind: "running", title: "跑着的" };
+const QS_BLOCK = { id: "qs-block", kind: "awaiting", waitClass: "blocked", title: "等答复" };
+const QS_ERROR = { id: "qs-error", kind: "awaiting", waitClass: "error", title: "出错了" };
+const QS_DONE = { id: "qs-done", kind: "awaiting", waitClass: "done", title: "完成了" };
+const QS_SUB = { id: "qs-sub", kind: "subagent", title: "子代理" };
+const QS_JOB = { id: "job:qs-run:1", kind: "job", title: "任务" };
+const qsGroups = switchCandidates([QS_RUN, QS_BLOCK, QS_ERROR, QS_DONE, QS_SUB, QS_JOB], "qs-sub");
+assert.deepEqual(
+	qsGroups.running.map((entry) => entry.id),
+	["qs-run"],
+	"切换候选：运行中组只收 running 主会话（R-01-028/AC-05）",
+);
+assert.deepEqual(
+	qsGroups.waiting.map((entry) => entry.id),
+	["qs-block", "qs-error"],
+	"切换候选：等待行动组同时收阻塞等待与错误提醒（R-01-028/AC-05）",
+);
+assert.deepEqual(
+	qsGroups.completed.map((entry) => entry.id),
+	["qs-done"],
+	"切换候选：完成提醒单列一组（R-01-028/AC-05）",
+);
+assert.deepEqual(
+	switchCandidates([QS_RUN, QS_BLOCK, QS_ERROR, QS_DONE, QS_SUB, QS_JOB], "qs-run"),
+	{ running: [], waiting: [QS_BLOCK, QS_ERROR], completed: [QS_DONE] },
+	"切换候选：开关跳转目标时排除当前会话本身（R-01-028/AC-05）",
+);
+assert.deepEqual(
+	switchCandidates([QS_SUB, QS_JOB], "qs-run"),
+	{ running: [], waiting: [], completed: [] },
+	"切换候选：子代理与后台任务条目不进浮层（R-01-028/AC-05）",
+);
+assert.deepEqual(
+	switchCandidates([QS_RUN, QS_BLOCK], null).running.map((entry) => entry.id),
+	["qs-run"],
+	"切换候选：当前会话不可得时不误剔任何条目（R-01-028/AC-05）",
+);
+assert.deepEqual(
+	switchCandidates(null, "qs-run"),
+	{ running: [], waiting: [], completed: [] },
+	"切换候选：入参不是数组时返回三个空组，不抛错（R-01-028/AC-06）",
+);
+
+// 常态零侵入（AC-01）：不注册任何宿主槽位、不碰标题行与面包屑——实现里既不得出现
+// slots 服务查找，也不得出现 lineage 槽名。
+assert.ok(
+	!quickSwitchSource.includes('optionalService("slots")') &&
+		!quickSwitchSource.includes("conversation.session.header.lineage") &&
+		!quickSwitchSource.includes("dap-hs-") &&
+		/.dap-qs-menu \{[^}]*position: fixed;/.test(quickSwitchSource),
+	"快捷切换不占用宿主标题行槽位，浮层自行 portal 到 body（R-01-028/AC-01）",
+);
+// 热键唤出（AC-02）：Ctrl+Tab 常驻监听、捕获期拦截，且排除 Alt/Cmd 干扰组合。
+assert.ok(
+	quickSwitchSource.includes('const HOTKEY_KEY = "Tab";') &&
+		quickSwitchSource.includes("const HOTKEY_CYCLE_KEYS = new Set([HOTKEY_KEY]);") &&
+		quickSwitchSource.includes("if (!event.ctrlKey || event.altKey || event.metaKey) return;") &&
+		quickSwitchSource.includes('document.addEventListener("keydown", onQuickSwitchKeyDown, true)') &&
+		quickSwitchSource.includes('document.addEventListener("keyup", onQuickSwitchKeyUp, true)') &&
+		quickSwitchSource.includes('document.removeEventListener("keydown", onQuickSwitchKeyDown, true)'),
+	"Ctrl+Tab 唤出浮层，监听常驻且挂摘成对（R-01-028/AC-02）",
+);
+// 循环与松手确认（AC-03）：按住循环（Shift 反向），松开 Ctrl 提交，Esc 取消。
+assert.ok(
+	quickSwitchSource.includes("function cycleQuickSwitch(dir)") &&
+		quickSwitchSource.includes("cycleQuickSwitch(event.shiftKey ? -1 : 1);") &&
+		quickSwitchSource.includes("function commitQuickSwitch(explicitId)") &&
+		quickSwitchSource.includes('if (event.key !== "Control") return;') &&
+		quickSwitchSource.includes('if (event.key === "Escape" && quickSwitchOpen)'),
+	"按住 Ctrl 连按 Tab 循环高亮、Shift 反向、松开 Ctrl 提交、Esc 取消（R-01-028/AC-03、AC-08）",
+);
+// 浮层开启期间方向键也能移动选中（Ctrl 仍按住），与 Tab 共用同一循环函数（AC-03）。
+assert.ok(
+	quickSwitchSource.includes('if (quickSwitchOpen && (event.key === "ArrowDown" || event.key === "ArrowUp"))') &&
+		quickSwitchSource.includes('cycleQuickSwitch(event.key === "ArrowDown" ? 1 : -1);'),
+	"浮层开启时上下方向键同样移动选中，不改变松手提交的语义（R-01-028/AC-03）",
+);
+// 高亮不抢焦点（AC-03 的关键手感）：只改属性，不调用 focus。
+assert.ok(
+	quickSwitchSource.includes("function paintQuickSwitchHighlight()") &&
+		quickSwitchSource.includes('entry.el.setAttribute("data-active", "")') &&
+		!quickSwitchSource.includes(".focus?.()") &&
+		!quickSwitchSource.includes(".focus();"),
+	"循环高亮只改属性、不抢键盘焦点（R-01-028/AC-03）",
+);
+assert.ok(
+	quickSwitchSource.includes("closeQuickSwitch();") &&
+		quickSwitchSource.includes("openSessionFromBadge(id)"),
+	"提交与鼠标点选都收起浮层并走既有跳转通道（R-01-028/AC-04、AC-08）",
+);
+// 选中自身＝取消（AC-10）：当前会话单列末组、合成行不依赖它是否在活动条目里，
+// 提交到自身直接 return（不跳转）。鼠标点行与松开 Ctrl 共用 commitQuickSwitch。
+assert.ok(
+	quickSwitchSource.includes("quickSwitchOrder = [...order, ...cancelOrder];") &&
+		quickSwitchSource.includes("function commitQuickSwitch(explicitId)") &&
+		quickSwitchSource.includes("if (current !== \"\" && id === current) return;") &&
+		quickSwitchSource.includes('{ tone: "current", label: "当前会话", rows: [currentRow] }') &&
+		quickSwitchSource.includes('here.textContent = "当前";'),
+	"浮层含当前会话行作为取消出口；选中自身只收起不跳转（R-01-028/AC-10）",
+);
+// 提示条已移除（东家 2026-11-11 反馈）：面板里不得再常驻热键说明。
+assert.ok(
+	!quickSwitchSource.includes("dap-qs-hint") &&
+		!quickSwitchSource.includes("松开 Ctrl 前往"),
+	"面板不再常驻快捷键提示条（R-01-028/AC-02）",
+);
+// 工作区标签（AC-12）：取 buildEntries 已算好的 workspaceTitle，空则整块隐藏；
+// 与活动卡片一致——排在标题**之前**、同处标题行，并按工作区身份键着色。
+// 签名必须含标题与身份键，否则换工作区不改标题时行不会刷新。
+assert.ok(
+	quickSwitchSource.includes('workspace: String(entry.workspaceTitle ?? "").trim(),') &&
+		quickSwitchSource.includes('workspaceKey: String(entry.workspaceKey ?? "").trim(),') &&
+		quickSwitchSource.includes("line.append(ws, title);") &&
+		quickSwitchSource.includes("texts.append(line, info);") &&
+		quickSwitchSource.includes('const wsTitle = String(row.workspace ?? "").trim();') &&
+		quickSwitchSource.includes('unit.ws.hidden = wsTitle === "";') &&
+		quickSwitchSource.includes("paintWorkspaceColor(unit.ws, row.workspaceKey);") &&
+		quickSwitchSource.includes('"--dap-workspace-hue": foreground?.hue,') &&
+		quickSwitchSource.includes("${row.workspace}") &&
+		quickSwitchSource.includes("${row.workspaceKey}"),
+	"每行工作区标签排在标题行开头、按身份键着色并参与签名（R-01-028/AC-12）",
+);
+// 标签配色与活动卡片同源：同一套 --dap-workspace-* 变量名，深浅主题各一条规则。
+assert.ok(
+	quickSwitchSource.includes(".dap-qs-ws {\n  flex: none;") &&
+		quickSwitchSource.includes("color-mix(in oklch, var(--dap-qs-ws-bg)") &&
+		quickSwitchSource.includes("body:not([data-ds-dark-theme]) .dap-qs-ws {"),
+	"工作区标签在 OKLCH 空间按槽位前景/背景着色，深色与浅色主题各一套（R-01-028/AC-12）",
+);
+
+// 空态文案与两行结构（AC-05、AC-06）。
+assert.ok(
+	quickSwitchSource.includes('empty.textContent = "暂无其他会话";') &&
+		quickSwitchSource.includes("if (desired.length === 0) desired.push(empty);"),
+	"无候选时呈现明确空态文案而非空面板（R-01-028/AC-06）",
+);
+// 过渡动画（AC-11）：面板入场/退场各自一段，退场由 data-closing 触发、定时器收尾
+// （不用 animationend——reduced-motion 下动画被关掉会永久卡住），并尊重 reduced-motion。
+assert.ok(
+	quickSwitchSource.includes("animation: dap-qs-in .14s cubic-bezier(.2, .8, .3, 1);") &&
+		quickSwitchSource.includes("animation: dap-qs-out .13s ease-in forwards;") &&
+		quickSwitchSource.includes('menu.setAttribute("data-closing", "")') &&
+		quickSwitchSource.includes("quickSwitchCloseTimer = setTimeout(() => {") &&
+		quickSwitchSource.includes("@media (prefers-reduced-motion: reduce) {") &&
+		quickSwitchSource.includes("const QUICK_SWITCH_CLOSE_MS = 260;"),
+	"浮层有入场/退场过渡，退场用定时器收尾并尊重降低动效偏好（R-01-028/AC-11）",
+);
+assert.ok(
+	quickSwitchSource.includes("const preview = detail?.previews?.userPreview ?? \"\";") &&
+		quickSwitchSource.includes('unit.info.hidden = row.info === "";'),
+	"第二行只读既有日志窗口派生的用户消息首行，不可得时整行隐藏（R-01-028/AC-07）",
+);
+// 档位资源纪律：浮层不得为第二行发起读取（R-01-025）。注释里提及这些标识符是为了
+// 说明禁止原因，先剥掉注释行再断言真实调用。
+const qsPublishBody = quickSwitchSource.slice(
+	quickSwitchSource.indexOf("function publishQuickSwitchCandidates(entries, currentId, currentTitle) {"),
+	quickSwitchSource.indexOf("function openQuickSwitch() {"),
+);
+const qsPublishCode = qsPublishBody
+	.split("\n")
+	.filter((line) => {
+		const trimmed = line.trim();
+		return !trimmed.startsWith("//") && !trimmed.startsWith("*") && !trimmed.startsWith("/**");
+	})
+	.join("\n");
+assert.ok(
+	qsPublishBody.length > 0 &&
+		!qsPublishCode.includes("previewFallbackIds") &&
+		!qsPublishCode.includes("loadNativeDetails") &&
+		!qsPublishCode.includes("captureSessionLog"),
+	"切换候选不为浮层内容发起日志读取或分页深翻（R-01-028/AC-07、R-01-025/AC-03）",
+);
+// 子代理不进候选（AC-09）：候选由 core 的 switchCandidates 单点过滤，浮层不自行判断。
+assert.ok(
+	/function switchCandidates\(entries, currentId = null\)/.test(coreSource) &&
+		coreSource.includes('if (entry?.kind !== "running" && entry?.kind !== "awaiting") continue;') &&
+		!quickSwitchSource.includes('kind === "subagent"'),
+	"子代理与会话无关条目在 core 单点过滤，浮层不重复判断（R-01-028/AC-09）",
+);
+// 接线与卸载（AC-01、AC-08）：client.mjs 只留 5 个接入点，实现全部在 quick-switch.mjs。
+assert.ok(
+	clientSource.includes("QUICK_SWITCH_CSS") &&
+		clientSource.includes("function quickSwitchOf()") &&
+		clientSource.includes("quickSwitchOf().publish(") &&
+		clientSource.includes("quickSwitchOf().connect();") &&
+		clientSource.includes("quickSwitch?.dispose();"),
+	"client.mjs 只保留样式并入、构造、publish、connect、dispose 五个接入点（R-01-028/AC-01）",
+);
+assert.ok(
+	!clientSource.includes("dap-qs-") &&
+		!clientSource.includes("function createQuickSwitch") &&
+		!clientSource.includes("function publishQuickSwitchCandidates"),
+	"切换器实现不外溢回 client.mjs（合并上游时实现段不参与冲突，C-108 后继）",
+);
+assert.ok(
+	!bundle.includes('document.addEventListener("click"'),
+	"点外关闭不得在 document 上拦点击（R-01-028/AC-08）",
 );
 
 

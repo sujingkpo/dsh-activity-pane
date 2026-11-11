@@ -1392,6 +1392,40 @@ export function partitionDoneEntries(entries) {
 	return { done, rest };
 }
 
+/** 标题栏快速切换会话的候选分组（新增功能，R-01-028）：把活动条目分成
+ *  「运行中 / 等待行动 / 已完成」三组，并剔除**当前会话**（标题所在会话的 id）
+ *  ——下拉只列「除当前会话外」的可切换会话。
+ *  只收 kind 为 running/awaiting 的主会话条目：子代理（kind 'subagent'）与后台
+ *  任务（kind 'job'）子条目不是可切换的会话单位，直接跳过。
+ *  分组口径与三状态角标同源（classifyActiveEntries 的领域定义，DOMAIN.md「等待
+ *  行动」「完成提醒」「错误提醒」）：
+ *    运行中   = kind 'running'
+ *    等待行动 = kind 'awaiting' 且 waitClass 为 'blocked' 或 'error'（用户 2026-11-11
+ *               确认阻塞与出错两类也要进下拉）
+ *    已完成   = kind 'awaiting' 且 waitClass 'done'（完成提醒）
+ *  classifyActiveEntries 只把 blocked 与 done 归组、error 不计入任何组，故此处直接
+ *  按 kind/waitClass 分流，不套用它（那会让出错条目静默消失）。
+ *  组内顺序原样保留 buildEntries 的排序（运行组→等待组，组内时间倒序），本函数
+ *  不重新排序，避免出现第二份排序口径。
+ *  currentId 为空/未给出时不做剔除（渲染层按各自标题所在会话就近过滤）。
+ *  空/非法输入返回三组空数组。 */
+export function switchCandidates(entries, currentId = null) {
+	const running = [];
+	const waiting = [];
+	const completed = [];
+	const current = currentId === null || currentId === undefined ? "" : String(currentId);
+	for (const entry of Array.isArray(entries) ? entries : []) {
+		if (entry?.kind !== "running" && entry?.kind !== "awaiting") continue;
+		if (current !== "" && String(entry.id) === current) continue;
+		if (entry.kind === "running") running.push(entry);
+		// 完成提醒单列一组（与窗格「已完成」分区同一判定）；其余等待行动
+		// （阻塞等待 blocked、错误提醒 error）归入「等待行动」。
+		else if (entry.waitClass === "done") completed.push(entry);
+		else waiting.push(entry);
+	}
+	return { running, waiting, completed };
+}
+
 /** 「已完成」分区条目的未读判定（点击条目即已读）：readAt 为该会话已读时的
  *  lastTurnEnd 游标，条目的进入时刻（stateAt = 最近一次回合结束登记时刻）晚于游标
  *  即为未读——新回合结束会推进 stateAt，旧游标自动失效，条目重新变未读。

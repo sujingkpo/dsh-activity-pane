@@ -19,8 +19,9 @@
 - `src/core.mjs` — 纯函数层（快照 → 条目映射、时间线折叠、徽标统计等），不触碰 DOM，可 Node 单测。
 - `src/host.mjs` — 宿主半：订阅 `session/event` 维护完成/错误提醒事实与每会话 busy 记账，暴露 `/dsh-activity-pane/api/{ack,acks,acks/stream,busy,busy/stream}`；持久化到 `dsh-storage-domain` 的两张表（`acks` 与 `dsh_activity_pane_turns.turn_stats`）。
 - `src/navigation.mjs` — 卡片点击/键盘激活与卸载绑定。
+- `src/quick-switch.mjs` — Ctrl+Tab 快捷会话切换（居中浮层、热键循环与松手提交、候选发布）；实现整体在本文件，`client.mjs` 只保留注入与生命周期接线。
 - `.dsh-plugin/index.mjs` — 静态宿主入口，转发 `apply`/`inject`/`name`/`Config` 自 `src/host.mjs`；免构建，不要在此写实现。
-- `.dsh-plugin/client.js` — **生成物且入库**：由 `scripts/build-client.mjs` 拼接 `core.mjs` + `navigation.mjs` + `client.mjs` 得到，禁止手改。
+- `.dsh-plugin/client.js` — **生成物且入库**：由 `scripts/build-client.mjs` 拼接 `core.mjs` + `navigation.mjs` + `quick-switch.mjs` + `client.mjs` 得到，禁止手改。
 - `scripts/` — 构建、单元检查、staged bundle 一致性、watch、人工验收清单、性能基线。
 - `e2e/` — `run.mjs` 运行器 + `boot.mjs` 隔离环境 + `specs/*.mjs`（28 个 spec）+ `mock-llm.mjs`。
 - `tools/` — AgentMap 校验器（Python）：`agentmap_lint.py`、`test_impact_lint.py`、`agentmap_validate_commit_msg.py`。
@@ -63,7 +64,7 @@
 ## 代码风格约定
 
 - 缩进统一 **tab**；文件与函数写中文注释，测试类文件头部用 `@description` / `@author` / `@date`（见 `scripts/host-reconcile.test.mjs`）。
-- 无 ESLint / Prettier：风格以既有文件为准，且**同一文件内保持一致**——`src/host.mjs`、`scripts/watch.mjs`、`scripts/build-client.mjs` 是单引号 + 无分号；`src/client.mjs`、`src/core.mjs`、`scripts/check.mjs` 是双引号 + 分号。改哪个文件就沿用哪个。
+- 无 ESLint / Prettier：风格以既有文件为准，且**同一文件内保持一致**——`src/host.mjs`、`scripts/watch.mjs`、`scripts/build-client.mjs` 是单引号 + 无分号；`src/client.mjs`、`src/core.mjs`、`src/quick-switch.mjs`、`scripts/check.mjs` 是双引号 + 分号。改哪个文件就沿用哪个。
 - 约束写法：`src/host.mjs:49` 的 `Config` schema 默认值必须与 `src/client.mjs` 的 `PANE_OPTION_DEFAULTS` 保持一致。
 - 仓库事实遵循「新增而非改写」：`.dsh-plugin/index.mjs` 明确要求原有 `export { apply, inject, name }` 逐字保留。
 

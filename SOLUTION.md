@@ -331,6 +331,7 @@ flowchart LR
 | R-01-025 | 窗格渲染器 | 档位资源纪律：紧凑档主会话日志窗口/深翻/目录读取门控、切档再水合与隐藏行跳写、任务子卡不构建与时长时钟门控 | src/core.mjs、src/client.mjs |
 | R-01-026 | 宿主侧栏角标 | 入口行三状态角标、分组明细弹窗、不依赖窗格挂载的数据通路、完成提醒已读/未读标识与已完成的批量动作、窗格之外入口切换当前会话的联动已读 | src/core.mjs、src/client.mjs |
 | R-01-027 | 完成确认宿主侧 | 会话移除后的宿主记录对账清理（启动全量 + 实时单条）与归档不删记录 | src/host.mjs |
+| R-01-028 | 快捷切换器 | Ctrl+Tab 唤出的居中切换浮层（热键循环高亮与松手提交、当前会话作取消出口、候选单点派生、body portal、过渡动画、标题行工作区标签、常态零侵入宿主标题行） | src/core.mjs、src/quick-switch.mjs |
 ## 产品契约
 
 - 活动卡片集合：`活动状态模型#buildEntries(snapshot, workspaceItems, detailsById, completions, delegatingIds, archivedIds, waitingStarts)` 产出已排序的活动卡片条目数组——运行中主会话在前、按最后一次用户指令时间（宿主列表时间）从新到旧；非运行中主会话在后、按进入等待/完成状态的时刻从新到旧——阻塞等待取回合内等待边界开启时刻（`waitingStarts` 入参，Map id → 毫秒时刻，来自宿主侧回合记账 `openWaitStart`，缺失回落宿主列表时间），完成提醒/错误提醒取最近一次回合结束登记时刻（缺失回落宿主列表时间）；两组相同时间保持宿主列表出现顺序（R-01-001）；`completions` 入参（Map id → `{ lastTurnEnd, lastTurnEndKind, lastTurnEndError, ackedAt }`，来自宿主侧 ack 状态）使完成提醒/错误提醒中会话以 awaiting 条目保留在活动区（R-01-002/AC-05、AC-13、R-01-010/AC-06）；awaiting 条目同时携带 `stateAt`（进入当前等待行动状态的时刻：阻塞等待取 `waitingStarts`、完成/错误提醒取 `lastTurnEnd`，与排序键同源同值；不可得为 null——排序键缺失时的宿主列表时间回退仅用于排序，不作显示时刻，R-01-002/AC-14）。`jobs.state.rows`（jobs 服务快照的按会话任务视图）经 `liveJobs` 派生并入 `buildEntries`/`buildRecent`：存在在跑后台任务的主会话归入运行组（排序键沿用宿主列表时间），条目携带 `liveJobs`（`{ id, kind, label, status, startedAt }[]`，`startedAt` 升序）与 `selfRunning`（自身回合是否真实运行，布尔）——前者供渲染层在标题行标注数量（R-01-023/AC-01、AC-04），后者区分「仅后台任务」（隐藏进度行、呈现冻结）与真实回合运行，并门控数量注闪烁与时间线/标题圆点停闪（仅后台任务支撑运行呈现时闪烁并暂停圆点呼吸，R-01-023/AC-11）；并为每个在跑任务产出 `kind: "job"` 子条目（`{ id: "job:<sessionId>:<jobId>", parentId, depth+1, kind, title=label, jobKind, jobStatus, jobStartedAt }`，归属会话以 `parentId` 承载），任务子卡为纯展示，激活不触发会话跳转（R-01-023/AC-08）；任务卡两行呈现——第一行为工具名称（经 `jobKindLabel` 友好映射：bash→Bash、pwsh→PowerShell、subagent→子代理，未知 kind 原样、不可得时仅保留状态点与时长）与随时钟推进的已运行时长，第二行为任务内容原文（`label`，mono 单行省略截断，悬停以原生 tooltip 显示完整原文；内容不可得——`label` 缺失或纯空白——时不显示第二行，R-01-023/AC-05、AC-06）；job 子条目的渲染签名携带 `jobsAgeSec`（秒桶，渲染期注入），使任务行时长随时钟照常推进（`jobKind` 不入签名：同一 jobId 的工具类型恒定，任务视图整体已随推送帧入签名）；母会话条目的 `selfRunning` 入渲染签名（R-01-023/AC-11）：任务在跑期间自身回合结束/重启驱动数量注闪烁与圆点停闪门控重绘。
@@ -527,6 +528,23 @@ flowchart LR
     - 隐藏：桌面折叠窄条态随 `.dap-header` 整体隐藏，移动端抽屉形态同样适用（R-01-022/AC-03）。
     - 生命周期：链接随窗格骨架创建与移除，无新增监听与状态耦合。
 - 代码位置: src/client.mjs
+- 实现: 单端（浏览器 client bundle）
+
+### 快捷切换器
+- 职责: Ctrl+Tab 唤出的跨会话快速跳转浮层——热键循环高亮、松手提交、候选复用活动条目派生、常态零侵入宿主外观（实现 R-01-028）
+- 关键内部结构:
+  - 独立文件 `src/quick-switch.mjs`：实现整体以工厂 `createQuickSwitch(deps)` 导出，依赖全部经入参注入（`getSessionDetails`/`isDisposed`/`switchCandidates`/`resolveWorkspaceColors`/`makeEl`/`openSessionFromBadge`），不引用 `client.mjs` 的闭包状态；`client.mjs` 只保留五个接入点（样式并入、`quickSwitchOf()` 构造、`publish`、`connect`、`dispose`）。构建侧由 `scripts/build-client.mjs` 在 `client.mjs` 之前拼入同一工厂作用域，`scripts/check-staged-client.mjs` 的 inputs 同步登记该文件。
+  - 零侵入宿主外观（AC-01）：不注册任何宿主槽位、不查找 `slots` 服务、不碰标题行与面包屑（不遮蔽宿主自带的子代理切换器）；未按热键时不创建任何 DOM，浮层惰性建立且直挂 `document.body`（`position: fixed` 居中，`top: 14vh`、宽 560px 上限 640px），不受标题区 `overflow` 裁剪。面板底色取不透明的 `--dsw-alias-bg-layer-2` 实心底——宿主菜单面别名（`--dsw-specific-menu`）自带约 70% 透明度，沿用会让面板透出背后内容而发灰。
+  - 热键（AC-02、AC-03）：`document` 上常驻一个捕获期 `keydown` 监听——`Ctrl+Tab` 唤出并把高亮向后移（`Ctrl+Shift+Tab` 向前），浮层开启期间上/下方向键同样移动高亮（与 Tab 共用同一循环函数，向下＝向后），`Alt`/`Meta` 同时按下时不触发（避免与系统快捷键混淆）；`keyup` 中 `Control` 松开即提交（AC-04），唤出后未按过 Tab 则高亮为 -1、松手不跳转；`Escape` 取消。方向键不参与提交，松手语义不变。监听在 `connect` 时成对挂载、`dispose` 时成对摘除。注：纯浏览器标签页里 `Ctrl+Tab` 被浏览器标签切换抢占、页面收不到该事件，桌面壳 webview 无标签栏时可用（用户 2026-11-11 拍板仍用 Ctrl+Tab）。
+  - 循环高亮不抢焦点：`paintQuickSwitchHighlight()` 只写 `data-active`/`aria-selected` 属性并 `scrollIntoView({ block: "nearest" })`，全程不调用 `focus()`——焦点留在宿主输入框，这是 Alt+Tab 手感的关键；鼠标点选行与热键提交共用同一提交路径（AC-04、AC-08）。
+  - 候选单点派生：core `switchCandidates(entries, currentId)` 只收 `kind` 为 `running`/`awaiting` 的主会话（跳过 `subagent`/`job`）并以 `currentIdOf(snapshot)` 排除当前会话，归为运行中 / 等待行动（阻塞等待与错误提醒）/ 已完成（完成提醒）三段，组内顺序完全沿用 `buildEntries` 既有排序；不套用 `classifyActiveEntries`（它不归入错误提醒，会让出错会话静默消失）。浮层不重复做子代理判定（AC-05、AC-09）。
+  - 行内两行文本取自本帧既有派生：标题取活动条目标题（空则回落会话 id），第二行只读既有日志窗口派生的 `detail.previews.userPreview`，不为浮层把条目加进预览兜底集合、不触发日志读取或分页深翻；不可得时整行 `hidden`（AC-07、R-01-025 档位资源纪律）。
+  - 工作区标签与活动卡片同构（AC-12）：标签排在标题**之前**、与标题同处一行（行内 `.dap-qs-line` 承载「标签 + 标题」，第二行预览另起），取 `buildEntries` 已算好的 `workspaceTitle`，空则整块隐藏、不回查工作区数据。配色复用活动卡片那一套 `--dap-workspace-*` 自定义属性：发布时以本帧候选的 `workspaceKey` 集合调一次 core `resolveWorkspaceColors`，渲染时按行的身份键把 12 个变量写到标签上，颜色公式（OKLCH 前景 / 背景变体 / 描边混合）由 CSS 侧计算，深色与浅色主题各一套。候选签名含标题与身份键，换工作区但标题相同时也刷新。
+  - 行节点按会话 id 复用、跨轮只改文本与 `data-tone`，只在位置真正变化时移动节点（连按 Tab 时不闪烁）；分组段头按 tone 复用；无候选时显示「暂无其他会话」（AC-06）。候选签名（标题/预览/色调）未变即不碰 DOM。
+  - 选中自身即取消（AC-10）：当前会话不参与 `switchCandidates` 的三段分组，而是由 `currentId` 与 `mainTitle` 现场合成一行、单列末组「当前会话」；行上加 `data-current` 空心圈与「当前」角标。它排在循环序列末尾，首按 Tab 仍先落到真正可跳转的目标上；`commitQuickSwitch` 命中当前会话 id 时只收起、不调跳转通道，鼠标点该行同理。故浮层在任何时刻都有取消出口，不依赖 Esc。
+  - 过渡动画（AC-11）：入场 `dap-qs-in .14s`；退场由 `closeQuickSwitch` 打 `data-closing` 触发 `dap-qs-out .13s forwards`，同时把只服务退场的轻遮罩 `.dap-qs-veil` 显形跑 `dap-qs-veil-out .26s`，用这 260ms 盖住新会话尚未画出的空档（遮罩 `pointer-events: none`、唤出时不显示）。落 `hidden` 用 `QUICK_SWITCH_CLOSE_MS = 260` 定时器收尾而非 `animationend`——`prefers-reduced-motion: reduce` 下动画被整段关闭，动画事件永不触发，用事件收尾会让面板永久卡在可见态。面板内不再常驻快捷键说明条。
+  - 生命周期：`dispose` 摘热键与 `blur` 监听、清退场定时器、移行复用表与分组段头、移除浮层与遮罩 DOM 并复位候选模型；重复调用安全。
+- 代码位置: src/quick-switch.mjs、src/core.mjs、src/client.mjs
 - 实现: 单端（浏览器 client bundle）
 
 ### E2E 验证基建
