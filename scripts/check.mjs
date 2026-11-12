@@ -5626,8 +5626,19 @@ assert.ok(
 		quickSwitchSource.includes("function commitQuickSwitch(explicitId)") &&
 		quickSwitchSource.includes("if (current !== \"\" && id === current) return;") &&
 		quickSwitchSource.includes('{ tone: "current", label: "当前会话", rows: [currentRow] }') &&
-		quickSwitchSource.includes('here.textContent = "当前";'),
-	"浮层含当前会话行作为取消出口；选中自身只收起不跳转（R-01-028/AC-10）",
+		quickSwitchSource.includes('here.textContent = "当前";') &&
+		quickSwitchSource.includes("line.append(here, ws, title);"),
+	"浮层含当前会话行作为取消出口；「当前」标签在标题行最前；选中自身只收起不跳转（R-01-028/AC-10）",
+);
+// 失焦语义（AC-04 的配套）：窗口没焦点时不接管任何热键，浮层若还在屏则当场收起；
+// 页面转隐藏（切标签/最小化）同样收起，避免回来看到一个停在旧位置的残影。
+assert.ok(
+	quickSwitchSource.includes("if (!document.hasFocus()) {") &&
+		quickSwitchSource.includes("function onQuickSwitchVisibilityChange()") &&
+		quickSwitchSource.includes('if (document.visibilityState === "hidden") cancelQuickSwitch();') &&
+		quickSwitchSource.includes('document.addEventListener("visibilitychange", onQuickSwitchVisibilityChange);') &&
+		quickSwitchSource.includes('document.removeEventListener("visibilitychange", onQuickSwitchVisibilityChange);'),
+	"窗口失焦期间不接管快捷键、页面隐藏即收起，监听成对挂挂摘（R-01-028/AC-04）",
 );
 // 提示条（东家 2026-11-12 反馈：浮层里要能看到快捷键）：常驻底部、只读不拦指针，
 // 文案与按键分派同源（QUICK_SWITCH_HINTS 一张表），且不参与键盘循环序列。
@@ -5646,7 +5657,7 @@ assert.ok(
 assert.ok(
 	quickSwitchSource.includes('workspace: String(entry.workspaceTitle ?? "").trim(),') &&
 		quickSwitchSource.includes('workspaceKey: String(entry.workspaceKey ?? "").trim(),') &&
-		quickSwitchSource.includes("line.append(ws, title);") &&
+		quickSwitchSource.includes("line.append(here, ws, title);") &&
 		quickSwitchSource.includes("texts.append(line, info);") &&
 		quickSwitchSource.includes('const wsTitle = String(row.workspace ?? "").trim();') &&
 		quickSwitchSource.includes('unit.ws.hidden = wsTitle === "";') &&

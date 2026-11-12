@@ -25,7 +25,11 @@ C-109 落地的是「右栏停靠能力开关」（`dockEnabled`）：停用后�
 8. **`rightTabDisposer` / `rightSlotDisposer` 刻意不注销**：宿主 `sidebarRightTabs` 只提供 `register`，无运行期注销 API；强调 disposer 会让 tab 类型从宿主表里消失而插件侧留下悬空引用，重新启用时无法再注册。运行期停用后那个空置 tab 留到下次启动——这条限制如实写进 PRD AC-02，不假装能做到。
 9. **快捷切换改显式确认**：新增 `quickSwitchConfirmArmed` 位。唤出浮层那次 Ctrl 的 `keyup` 只置位、不提交；此后任意一次 Ctrl `keyup` 才 `commitQuickSwitch()`。`openQuickSwitch`/`closeQuickSwitch` 都重置该位。浮层已打开时的 Ctrl+Tab 只 `cycle` 不提交；Tab/Shift+Tab/↑↓ 同样只 `cycle`；Enter 提交；Esc 取消；鼠标点行提交（与热键共用 `commitQuickSwitch`）。
 10. **当前会话行置顶但仍排在循环末尾**：`publishQuickSwitchCandidates` 的 `model` 顺序改为 当前会话组 → running → waiting → done（文档序置顶），而 `renderQuickSwitch` 里 `quickSwitchOrder = [...order, ...cancelOrder]` 把当前行放到循环序列末尾——首按 Tab 不会白白停在「取消」项上。当前行的工作区标签与配色（`resolveWorkspaceColors` 纳入其 `workspaceKey`）与其它行同源。
-11. **浮层底部常驻快捷键提示条**（东家 2026-11-12 追加，m01365）：C-108 曾按 2026-11-11 的反馈删掉常驻说明「松开 Ctrl 前往…」，本次改为一张 `QUICK_SWITCH_HINTS` 键位表（唤出 / 切换、移动、再按确认、确认、取消）+ `kbd` 键帽，只读、`pointer-events: none`、`flex: none` 固定在正文下方。旧的单行散文说明确实该删（它是操作提示，读一次就够），但改后的交互有「再按一次 Ctrl 才确认」这种反直觉动作，没有键位表用户不可能猜到——所以整体否掉的是散文、恢复的是键位表。文案表与 `onQuickSwitchKeyDown`/`onQuickSwitchKeyUp` 的键位分支同源，改键位必须两处一起改。排版按「辅助说明」定位：字号比正文小一档（10px，键帽 9px），整条 `justify-content: flex-end` 靠右——候选行与标题都左对齐，说明文字贴右边才不会与内容争视线（东家同日追加）。
+11. **浮层底部常驻快捷键提示条**（东家 2026-11-12 追加，m01365）：C-108 曾按 2026-11-11 的反馈删掉常驻说明「松开 Ctrl 前往…」，本次改为一张 `QUICK_SWITCH_HINTS` 键位表（唤出 / 切换、移动、再按确认、确认、取消）+ `kbd` 键帽，只读、`pointer-events: none`、`flex: none` 固定在正文下方。旧的单行散文说明确实该删（它是操作提示，读一次就够），但改后的交互有「再按一次 Ctrl 才确认」这种反直觉动作，没有键位表用户不可能猜到——所以整体否掉的是散文、恢复的是键位表。文案表与 `onQuickSwitchKeyDown`/`onQuickSwitchKeyUp` 的键位分支同源，改键位必须两处一起改。排版按「辅助说明」定位：字号比正文小一档（10px，键帽 9px），整条 `justify-content: flex-end` 靠右——候选行与标题都左对齐，说明文字贴右边才不会与内容争视线（东家 2026-11-12 第一次追加）。同日第二次追加「还是有点太突出」，于是再压一档：整条 `opacity: .72`、键帽**去掉底色与描边**（带底会排出一串亮块，这是最主要的一处抢眼来源）、顶部洗线以 60% 混合淡化。
+
+12. **「当前」做成真正的标签并前移**：原来它是贴在行尾的 10px 灰底小胶囊，深色主题下与行底色几乎同值，等于看不见（东家 2026-11-12：「当前会话的当前没有搞成标签」）。改为与 `.dap-qs-ws` 同构的圆角胶囊（`border-radius: 999px`、`color-mix` 混正文色 13% 作底、无描边、中性单色），位置从行尾移到**标题行最前**（`line.append(here, ws, title)`），扫读序变成「当前 → 工作区 → 标题」。选中性单色而非彩色：工作区标签已经是一族彩色胶囊，两个彩色标签挤在一行会互相削弱；「当前」是单例状态，用无彩色反而更醒目。**被否**：留在行尾只换配色（行尾在长标题下会被推到很远处，扫读时根本回不到）、做成实心强调色（与宿主强调色耦合，主题切换会失配）。
+
+13. **失焦即视为放弃，而不是继续挂在后台**：浮层打开期间窗口失焦（切标签页、宿主切走、系统弹窗）就收起；`keydown` 首行再以 `document.hasFocus()` 复核。理由是 `window` 的 `blur` 在这些场景下会漏拍（焦点先进 iframe、宿主 webview 交接），只挂 `blur` 会留下「看不见却还在拦键」的浮层——此时用户按 Ctrl+Tab 会被吃掉但屏幕毫无反应。**被否**：失焦时保留浮层等回来（回来看到的是高亮停在旧位置、候选可能已过期的残影）、只靠 `blur` 不做 `hasFocus` 复核（漏拍场景无兜底）。
 
 #### 被否方案及原因
 - 保留面板内的复选框 + 插件页两个入口：两处状态容易打架，且停用后面板内入口根本不可达。

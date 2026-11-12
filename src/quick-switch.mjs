@@ -2,7 +2,8 @@
 //   Shift+Tab / ↑↓ 循环候选，但**松开 Ctrl 不再自动跳转**（东家 2026-11-12 反馈：
 //   按住 Ctrl 连按会误跳）；确认改为显式动作——再次按下并松开 Ctrl、Enter、或鼠标点行，
 //   Esc 取消。不占用宿主标题行槽位——宿主的子代理切换器保持原样，本模块只在 document
-//   上装一个常驻 keydown/keyup 监听。
+//   上装一个常驻 keydown/keyup 监听。窗口失焦（切标签页、宿主切走、系统弹窗抢焦点）
+//   期间一律不接管快捷键，并把已打开的浮层收起（东家 2026-11-12 反馈）。
 // @author czy
 // @date 2026-11-11
 
@@ -180,15 +181,20 @@ body:not([data-ds-dark-theme]) .dap-qs-ws {
   border-color: color-mix(in oklch, var(--dap-qs-ws-color) var(--dap-workspace-bg-light-border-mix, 42%), transparent);
 }
 .dap-qs-ws[hidden] { display: none; }
+/* 「当前」标签（东家 2026-11-12 反馈：原来那个行尾灰底小胶囊看不出来，要真做成标签）：
+   自本次起排进标题行**最前面**、工作区标签之前，与 .dap-qs-ws 同款圆角胶囊但走中性强调色
+   ——工作区标签是彩色族、这枚是单色，两者同排才不打架。底色用正文色的低混合，
+   深浅主题各自跟随，不需要另写 body:not([data-ds-dark-theme]) 分支。 */
 .dap-qs-here {
   flex: none;
-  align-self: center;
-  padding: 0 6px;
-  border-radius: 5px;
-  color: var(--dsw-alias-label-secondary, #6b7280);
-  background: var(--dsw-alias-interactive-bg-hover, rgba(0, 0, 0, .06));
-  font-size: 10px;
-  line-height: 16px;
+  padding: 0 7px;
+  border-radius: 999px;
+  color: var(--dsw-alias-label-primary, #1f2328);
+  background: color-mix(in oklch, var(--dsw-alias-label-primary, #1f2328) 13%, transparent);
+  font-size: 10.5px;
+  line-height: 14px;
+  font-weight: 500;
+  white-space: nowrap;
 }
 .dap-qs-texts {
   display: flex;
@@ -234,11 +240,14 @@ body:not([data-ds-dark-theme]) .dap-qs-ws {
   justify-content: flex-end;
   gap: 3px 9px;
   padding: 6px 11px 5px;
-  border-top: .5px solid var(--dsw-alias-border-l1, rgba(0, 0, 0, .08));
+  border-top: .5px solid color-mix(in oklch, var(--dsw-alias-border-l1, rgba(0, 0, 0, .08)) 60%, transparent);
   color: var(--dsw-alias-label-tertiary, #9aa0a6);
-  /* 比正文小一档：辅助说明不该与候选行争字号（东家 2026-11-12：快捷键信息小一点）。 */
+  /* 比正文小一档：辅助说明不该与候选行争字号（东家 2026-11-12：快捷键信息小一点）。
+     再压一档不透明度：它是「需要时才瞄一眼」的说明，不该与候选行同强度
+     （东家 2026-11-12 追加：还有有点太突出了，弱化一点）。 */
   font-size: 10px;
   line-height: 15px;
+  opacity: .72;
   pointer-events: none;
 }
 .dap-qs-hint {
@@ -247,15 +256,15 @@ body:not([data-ds-dark-theme]) .dap-qs-ws {
   gap: 3px;
   white-space: nowrap;
 }
-/* 键帽：literal key 走等宽字体，与 macOS/Windows 两套宿主外观都不冲突。 */
+/* 键帽：无底色、无描边，只用等宽字体与外边距把它和标签分开——
+   有底色就会在面板底部排出一串亮块，太抢视线（东家 2026-11-12：弱化一点）。
+   与 macOS/Windows 两套宿主外观都不冲突。 */
 .dap-qs-key {
   box-sizing: border-box;
   display: inline-block;
   min-width: 15px;
-  padding: 0 3px;
-  border: .5px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, .16));
-  border-radius: 4px;
-  background: var(--dsw-alias-interactive-bg-hover, rgba(0, 0, 0, .05));
+  padding: 0 2px;
+  border-radius: 3px;
   color: var(--dsw-alias-label-secondary, #6b7280);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 9px;
@@ -360,13 +369,14 @@ export function createQuickSwitch(deps) {
 		// 工作区标签常驻、按行是否有工作区切换 hidden。
 		const ws = makeEl("span", "dap-qs-ws");
 		ws.hidden = true;
-		// 角标常驻、按行是否当前会话切换 hidden：避免增删节点导致行宽跳动。
+		// 「当前」标签常驻、按行是否当前会话切换 hidden：避免增删节点导致行宽跳动。
+		// 位置在标题行最前（东家 2026-11-12 反馈），扫读顺序变成「当前 → 工作区 → 标题」。
 		const here = makeEl("span", "dap-qs-here");
 		here.textContent = "当前";
 		here.hidden = true;
-		line.append(ws, title);
+		line.append(here, ws, title);
 		texts.append(line, info);
-		el.append(dot, texts, here);
+		el.append(dot, texts);
 		// 鼠标路径与热键共用同一个提交函数：点行即提交，不需要先确认高亮。
 		el.addEventListener("click", () => {
 			const target = el.dataset.id ?? "";
@@ -635,6 +645,7 @@ export function createQuickSwitch(deps) {
 		}
 		paintQuickSwitchHighlight();
 		window.addEventListener("blur", cancelQuickSwitch);
+		document.addEventListener("visibilitychange", onQuickSwitchVisibilityChange);
 	}
 
 	/** 收起浮层：清高亮、摘窗口级监听，先跑退场过渡再落 hidden——切换本身有延时，
@@ -647,6 +658,7 @@ export function createQuickSwitch(deps) {
 		quickSwitchConfirmArmed = false;
 		paintQuickSwitchHighlight();
 		window.removeEventListener("blur", cancelQuickSwitch);
+		document.removeEventListener("visibilitychange", onQuickSwitchVisibilityChange);
 		const menu = quickSwitchEl;
 		const veil = quickSwitchVeil;
 		if (menu === null || menu.hidden) return;
@@ -673,6 +685,12 @@ export function createQuickSwitch(deps) {
 	/** 取消（Esc / 窗口失焦）：收起且不跳转。 */
 	function cancelQuickSwitch() {
 		closeQuickSwitch();
+	}
+
+	/** 页面转入隐藏（切标签页、最小化、宿主切走）时收起浮层：此刻用户看不见它，
+	 *  留着只会在回来时变成一个「已经在屏、但高亮停在旧位置」的残影。 */
+	function onQuickSwitchVisibilityChange() {
+		if (document.visibilityState === "hidden") cancelQuickSwitch();
 	}
 
 	/** 循环高亮：dir 为 +1 向后、-1 向前（Shift+Tab）。首按时落在第一项上；
@@ -712,6 +730,15 @@ export function createQuickSwitch(deps) {
 	 *  的 webview 没有标签栏，热键可用（用户 2026-11-11 拍板仍用 Ctrl+Tab）。 */
 	function onQuickSwitchKeyDown(event) {
 		if (isDisposed()) return;
+		// 窗口本身没有焦点时一律不接管快捷键（东家 2026-11-12：失焦后要么忽略、要么关闭）。
+		// window 的 blur 事件并不总在第一时间到（焦点先进 iframe、宿主 webview 交接、
+		// 系统弹窗抢焦点等场景都可能漏一拍），所以每个按键再确认一次真实焦点。
+		// 这条放在最前：失焦期间连 Esc 也不处理——浮层此刻已由 blur 收起。
+		if (!document.hasFocus()) {
+			// 兜底：真的漏了 blur（浮层还在屏），也在这里补一次收起，避免「看不见却还在拦键」。
+			if (quickSwitchOpen) closeQuickSwitch();
+			return;
+		}
 		if (event.key === "Escape" && quickSwitchOpen) {
 			event.preventDefault();
 			event.stopPropagation();
@@ -797,6 +824,7 @@ export function createQuickSwitch(deps) {
 		}
 		quickSwitchOpen = false;
 		window.removeEventListener("blur", cancelQuickSwitch);
+		document.removeEventListener("visibilitychange", onQuickSwitchVisibilityChange);
 		quickSwitchRowUnits.clear();
 		quickSwitchHeads.clear();
 		quickSwitchEl?.remove();
