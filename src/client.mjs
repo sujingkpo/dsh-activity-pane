@@ -72,6 +72,11 @@ const RECENT_PAGE_SIZE = 10;
 const TOP_THRESHOLD = 200;
 /** 面板停靠位置配置的 localStorage 持久化键（left/right 切换）。 */
 const POSITION_STORAGE_KEY = "dsh-activity-pane:position";
+/** 「启用活动会话窗格」配置的 localStorage 持久化键：false 时窗格整段不建立
+ *  （左右两列都不出现），只保留宿主侧栏角标与 Ctrl+Tab 快捷切换。
+ *  键名沿用早期「右栏停靠开关」的字符串：那次实验性写入可能已经落在用户浏览器里，
+ *  改名会让旧值变成孤儿键；语义按新口径解释（false = 窗格停用）。 */
+const PANE_ENABLED_STORAGE_KEY = "dsh-activity-pane:dock-enabled";
 /** 「隐藏最近历史」配置的 localStorage 持久化键。 */
 const RECENT_HIDDEN_STORAGE_KEY = "dsh-activity-pane:recent-hidden";
 /** 「最近历史可折叠」能力开关的 localStorage 持久化键。 */
@@ -80,6 +85,9 @@ const RECENT_COLLAPSIBLE_STORAGE_KEY = "dsh-activity-pane:recent-collapsible";
 const RECENT_COLLAPSED_STORAGE_KEY = "dsh-activity-pane:recent-collapsed";
 /** 宿主右侧栏 tab 的注册 id 与 kind：同 id 二次注册会抛错，故取全局唯一常量。 */
 const RIGHT_TAB_ID = "dsh-activity-pane";
+/** 插件页「本包配置」槽：宿主按包名派发（插件包详情页派发该槽时以包名作 key），
+ *  key 必须正好等于包的 package name / 设置命名空间。 */
+const PANE_SETTINGS_SLOT = "plugins.bundle.config";
 const RIGHT_TAB_KIND = "dsh-activity-pane";
 /** 宿主设置命名空间 = profile 补丁条目 id（与 cordis.patch.yml 的 id 保持一致）。 */
 const SETTINGS_NAMESPACE = "dsh-activity-pane";
@@ -107,14 +115,31 @@ const RIGHT_TAB_RETRY_MAX = 5;
 const RIGHT_TAB_RETRY_MS = 300;
 /** 面板内配置弹层的开关按钮 class。 */
 const SETTINGS_BTN_CLASS = "dap-settings";
-/** 三项新增呈现的缺省值。position/recentHidden 等价于既有行为；recentCollapsible
- *  按东家 2026-10-14 反馈改为默认开启——「最近历史」段头默认即折叠开关，
- *  折叠能力本身不再需要配置才可用（配置项仍可关掉它）。 */
+/** 四项新增呈现的缺省值。position/recentHidden/paneEnabled 等价于既有行为；
+ *  recentCollapsible 按东家 2026-10-14 反馈改为默认开启——「最近历史」段头默认即
+ *  折叠开关，折叠能力本身不再需要配置才可用（配置项仍可关掉它）。
+ *  paneEnabled=false 是**窗格总开关**（东家 2026-11-12：「停用之后连左侧也不出现，
+ *  并且可以在插件设置中设置打开」）：窗格在任何停靠面都不建立，右栏接线（react 探测、
+ *  tab 类型与正文席位注册）同样整段跳过；宿主侧栏三状态角标与 Ctrl+Tab 快捷切换
+ *  照常工作（两者都与窗格无关，是停用后仍能回到插件的入口）。 */
 const PANE_OPTION_DEFAULTS = Object.freeze({
 	position: "left",
+	paneEnabled: true,
 	recentHidden: false,
 	recentCollapsible: true,
 });
+
+
+/** 插件页设置卡片的内联样式（宿主插件页不给外来组件任何样式类，自备一份；
+ *  只用作尺寸/配色，全部取宿主别名变量，深浅主题自动跟随）。 */
+const PANE_SETTINGS_CSS = `
+.dap-settings-card { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; border: 1px solid var(--dsw-alias-border-l2, rgba(128, 128, 128, 0.24)); border-radius: var(--dsw-radius-md, 8px); background: var(--dsw-alias-bg-layer-2, transparent); }
+.dap-settings-card-title { margin: 0; font-size: 13px; font-weight: 600; color: var(--dsw-alias-label-primary, inherit); }
+.dap-settings-card-row { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--dsw-alias-label-primary, inherit); cursor: pointer; }
+.dap-settings-card-row input { margin: 0; }
+.dap-settings-card-note { margin: 0; font-size: 12px; line-height: 1.6; color: var(--dsw-alias-label-tertiary, rgba(128, 128, 128, 0.9)); }
+.dap-settings-card-error { margin: 0; font-size: 12px; line-height: 1.6; color: var(--dsw-alias-state-error-primary, #d9534f); }
+`;
 
 const CSS = `
 [data-dsh-activity-pane] {
@@ -629,6 +654,10 @@ const CSS = `
 [data-dsh-activity-pane] .dap-dock:focus-visible {
   background: #262932;
 }
+/* 位置切换按钮的 hidden 兜底：display:flex 会盖掉 UA 的 [hidden] 规则。
+   总开关移到宿主插件设置页后按钮常显，这条留作防御（宿主重排/停靠面切换期
+   仍可能临时置 hidden）。 */
+[data-dsh-activity-pane] .dap-dock[hidden] { display: none; }
 [data-dsh-activity-pane] .dap-settings {
   display: flex;
   align-items: center;
@@ -676,6 +705,8 @@ const CSS = `
   cursor: pointer;
 }
 [data-dsh-activity-pane] .dap-settings-row:hover { background: color-mix(in srgb, currentColor 8%, transparent); }
+/* 同上：display:flex 会盖掉 UA 的 [hidden]，行级隐藏须显式补规则（右栏停用时的位置行）。 */
+[data-dsh-activity-pane] .dap-settings-row[hidden] { display: none; }
 [data-dsh-activity-pane] .dap-settings-row input { margin: 0; accent-color: #65a0ff; }
 [data-dsh-activity-pane] .dap-density {
   display: flex;
@@ -2026,6 +2057,13 @@ function readStoredBool(key, fallback) {
 	return fallback;
 }
 
+/** 写入布尔型配置的 localStorage 记忆（localStorage 不可用时静默跳过）。 */
+function writeStoredBool(key, value) {
+	try {
+		window.localStorage.setItem(key, String(value));
+	} catch {}
+}
+
 /** 读取持久化停靠位置（配置通道未表态时的兜底）。 */
 function readStoredPosition() {
 	try {
@@ -2145,12 +2183,17 @@ function apply(ctx) {
 	/** 生效中的新增呈现配置（每轮渲染前刷新一次；配置通道变更即时驱动一轮渲染）。 */
 	let paneOptions = {
 		position: readStoredPosition(),
+		paneEnabled: readStoredBool(PANE_ENABLED_STORAGE_KEY, PANE_OPTION_DEFAULTS.paneEnabled),
 		recentHidden: readStoredBool(RECENT_HIDDEN_STORAGE_KEY, PANE_OPTION_DEFAULTS.recentHidden),
 		recentCollapsible: readStoredBool(RECENT_COLLAPSIBLE_STORAGE_KEY, PANE_OPTION_DEFAULTS.recentCollapsible),
 		recentCollapsed: readStoredBool(RECENT_COLLAPSED_STORAGE_KEY, false),
 	};
 	let rightTabDisposer = null;
 	let rightSlotDisposer = null;
+	/** 插件页设置卡片（窗格总开关）的槽位注销函数。 */
+	let paneSettingsDisposer = null;
+	/** 右栏接线是否已经尝试过（apply 期启用即 true；停用启动时为 false，重新启用补做一次）。 */
+	let paneWiringAttempted = false;
 	/** 待发起的右栏 tab 打开请求：只在停靠面切到 right 的那一刻置位，消费一次即清。
 	 *  这样「用户关掉 tab」不会被下一轮渲染重新打开。 */
 	let rightTabNeedsRequest = false;
@@ -2300,6 +2343,11 @@ function apply(ctx) {
 			return readStoredPosition();
 		}
 		if (typeof raw === "boolean") return raw;
+		// 新增布尔项必须在此显式加分支：下面两条是「其余字段一律回落
+		// recentCollapsible 键」的兜底，漏加会读到别人的配置。
+		if (key === "paneEnabled") {
+			return readStoredBool(PANE_ENABLED_STORAGE_KEY, PANE_OPTION_DEFAULTS.paneEnabled);
+		}
 		if (key === "recentHidden") {
 			return readStoredBool(RECENT_HIDDEN_STORAGE_KEY, PANE_OPTION_DEFAULTS.recentHidden);
 		}
@@ -2310,6 +2358,7 @@ function apply(ctx) {
 	function refreshPaneOptions() {
 		paneOptions = {
 			position: effectivePaneOption("position"),
+			paneEnabled: effectivePaneOption("paneEnabled"),
 			recentHidden: effectivePaneOption("recentHidden"),
 			recentCollapsible: effectivePaneOption("recentCollapsible"),
 			recentCollapsed: readStoredBool(RECENT_COLLAPSED_STORAGE_KEY, false),
@@ -2333,14 +2382,28 @@ function apply(ctx) {
 	 *  「隐藏最近历史」「最近历史可折叠」两项由配置文件通道与段头折叠手势承担——
 	 *  面板内不提供隐藏自身的控件，避免用户把历史区藏到找不回来。 */
 	function syncPaneDock() {
-		const wantDock = paneOptions.position === "right" && desktopQuery.matches ? "right" : "left";
+		// 窗格停用（paneEnabled=false）时停靠面恒为左列：position 的 right 值保留在配置里
+		// （重新启用即恢复），但不参与本轮停靠判定——停用态本来就不建窗格，这里只是让
+		// 状态机保持在「左列」，重新启用时走一次正常的左→右转换（含 tab 打开请求）。
+		const wantDock = paneOptions.paneEnabled !== false && paneOptions.position === "right" && desktopQuery.matches
+			? "right"
+			: "left";
 		if (wantDock === paneDock) return;
 		const pane = document.querySelector(`[${PANE_ATTR}]`);
 		paneDock = wantDock;
 		// 停靠面变更即整棵窗格换父：布局态、定位属性与滚动容器都随之改变，
 		// 渲染签名与已渲染 id 集合整体作废，强制下一轮全量重建。
 		renderedPane = null;
-		boundPane = null;
+		// 换面即换窗格：旧窗格上的控件绑定必须先解绑再脱手。只把 boundPane 置空会让
+		// bindPaneControls 挂的 document 级 capture 监听（pointerdown/keydown）失去唯一
+		// 的解绑入口，随每次换面线性累积。
+		releaseDetachedPaneBinding(true);
+		// 折叠态是左列专属形态（右栏由宿主接管宽度与开合）。左列折叠后切右栏时若把
+		// collapsed 带过去，data-collapsed="true" 会让右栏正文只剩 34px 窄条、且标题行
+		// 在右栏态已摘掉激活语义，用户既看不全也点不开——换面即复位。
+		if (wantDock === "right" && collapsed) {
+			collapsed = false;
+		}
 		lastSig = "";
 		pulseSignature = "";
 		prevRenderedActiveIds = new Set();
@@ -2379,6 +2442,14 @@ function apply(ctx) {
 	 *  整段为可选接线——宿主未提供右侧栏服务（部署裁剪）时静默跳过，配置项退化为
 	 *  「左列 / 右列」内的左列语义。 */
 	function connectSidebarRight() {
+		// 窗格停用：根本不注册 tab 类型与正文席位——宿主右栏不会出现本插件的 tab，
+		// 「唯一停靠 tab 关闭即整列收起」那条宿主规则也不会因本插件而生效。
+		// 生效值取缺省回退链（配置 → localStorage → 缺省），不直接读 paneOptions：
+		// 装配期还没跑过 refreshPaneOptions。
+		if (effectivePaneOption("paneEnabled") === false) return;
+		// 幂等：运行期重新启用会再调一次本函数，已注册过就不再重复注册（重复注册会让宿主
+		// 右栏出现两个同 id 的 tab 类型，后一个覆盖前一个，disposer 也只留最后一个）。
+		if (rightTabDisposer !== null) return;
 		const tabs = optionalService("sidebarRightTabs");
 		const slots = optionalService("slots");
 		if (!tabs || !slots) return;
@@ -2488,7 +2559,12 @@ function apply(ctx) {
 				queueSync();
 				return () => {
 					if (sidebarRightHost === host) sidebarRightHost = null;
-					document.querySelector(`[${PANE_ATTR}]`)?.remove();
+					// 只摘掉「确实停在本 tab 正文里」的窗格：停用右栏停靠后窗格会搬回左列，
+					// 此时用户再关掉这个（已空置的）tab，不能顺手把左列的窗格也摘了。
+					const pane = document.querySelector(`[${PANE_ATTR}]`);
+					if (pane !== null && pane.getAttribute("data-dap-docked") === "right") pane.remove();
+					// 摘除后立即排一轮同步，让窗格回到它该在的落点（左列）。
+					queueSync();
 				};
 			}, []);
 			return react.createElement("div", { className: "dap-right-host", ref: hostRef });
@@ -3056,6 +3132,117 @@ function apply(ctx) {
 			configUnsubscribe = null;
 		}
 	}
+	/** 插件设置页卡片本体（React 函数组件，createElement 构造——本插件不引入 JSX）。
+	 *  `view === "summary"` 时返回 null：宿主在插件列表行里只要求一句话摘要，
+	 *  表单只出现在包详情页（`view === "page"`）。
+	 *  写入走 controller.set("paneEnabled", next)：宿主 settings.mutate 成功后快照变化，
+	 *  subscribe 回调驱动 client.mjs 的 connectHostConfig 订阅者重算并重绘窗格。
+	 *  @param {object} react 宿主 ModuleLoader 提供的 react 运行时。
+	 *  @param {object} controller configForms 的 ConfigFormController。
+	 *  @param {(listener: Function) => Function} subscribe 稳定引用的订阅器。
+	 *  @param {() => object} getSnapshot 稳定引用的快照读取器。
+	 *  @returns {Function} React 组件。 */
+	function createPaneSettingsCard(react, controller, subscribe, getSnapshot) {
+		return function PaneSettingsCard(props) {
+			const snap = react.useSyncExternalStore(subscribe, getSnapshot);
+			const [busy, setBusy] = react.useState(false);
+			const [failure, setFailure] = react.useState("");
+			if (props?.view === "summary") return null;
+			const status = snap?.status ?? "loading";
+			const loading = status === "loading";
+			const unavailable = status === "unavailable";
+			// 值取宿主快照；schema 缺省 true——与 PANE_OPTION_DEFAULTS 同口径。
+			const enabled = typeof snap?.value?.paneEnabled === "boolean" ? snap.value.paneEnabled : true;
+			const writable = snap?.writable !== false;
+			const editable = !loading && !unavailable && writable && !busy;
+			const onToggle = () => {
+				if (!editable) return;
+				setBusy(true);
+				setFailure("");
+				Promise.resolve()
+					.then(() => controller.set("paneEnabled", !enabled))
+					.then((ok) => {
+						if (ok === false) setFailure("宿主拒绝了本次写入，请稍后重试。");
+					})
+					.catch((error) => setFailure(String(error?.message ?? error)))
+					.finally(() => setBusy(false));
+			};
+			const note = loading
+				? "正在读取宿主配置…"
+				: unavailable
+					? "宿主未服务本插件命名空间，开关不可用。"
+					: writable
+						? "关闭后左右两列都不再出现窗格；宿主侧栏角标与 Ctrl+Tab 快捷切换保留。已打开的窗格会立即移除。"
+						: "当前配置只读（由 profile 补丁锁定），只能在文件里修改。";
+			return react.createElement(
+				"section",
+				{ className: "dap-settings-card", "data-dap-settings-card": "" },
+				react.createElement("style", null, PANE_SETTINGS_CSS),
+				react.createElement("h3", { className: "dap-settings-card-title" }, "活动会话窗格"),
+				react.createElement(
+					"label",
+					{ className: "dap-settings-card-row" },
+					react.createElement("input", {
+						type: "checkbox",
+						checked: enabled,
+						disabled: !editable,
+						onChange: onToggle,
+						"data-pane-setting": "paneEnabled",
+					}),
+					react.createElement("span", null, "启用活动会话窗格"),
+				),
+				react.createElement("p", { className: "dap-settings-card-note" }, note),
+				failure === "" ? null : react.createElement("p", { className: "dap-settings-card-error", role: "alert" }, failure),
+			);
+		};
+	}
+
+	/** 插件设置页卡片（东家 2026-11-12 需求）：窗格总开关的唯一入口。
+	 *  宿主插件页把 `plugins.bundle.config` 槽按包名派发给包自己的组件——宿主不按
+	 *  Config schema 自动生成表单（`dsh-client-ui-plugin-manager/lib/client.js:6019-6023`
+	 *  只派发槽位，没有通用渲染器），所以本插件必须自带一个卡片。读写都走已接好
+	 *  的 configForms 控制器：读 subscribe/getSnapshot，写 controller.set(field, value)。
+	 *  约束（宿主 pwsh7 卡片的同款教训）：交给 useSyncExternalStore 的 subscribe /
+	 *  getSnapshot 必须是**稳定引用**，每次渲染新建闭包会无限重渲染。 */
+	function connectPaneSettingsSlot() {
+		const slots = optionalService("slots");
+		if (!slots) return;
+		const controller = configController;
+		if (controller === null || controller === undefined) return;
+		let react = null;
+		try {
+			react = rightReact();
+		} catch {
+			return;
+		}
+		// useSyncExternalStore 是 React 18 起才有的：宿主没有它就不注册（卡片退场好过白屏）。
+		if (typeof react.useSyncExternalStore !== "function") return;
+		const subscribe = (listener) => {
+			try {
+				return controller.subscribe?.(listener) ?? (() => {});
+			} catch {
+				return () => {};
+			}
+		};
+		const getSnapshot = () => {
+			try {
+				return controller.getSnapshot?.() ?? null;
+			} catch {
+				return null;
+			}
+		};
+		try {
+			paneSettingsDisposer = slots.inject(PANE_SETTINGS_SLOT, () =>
+				slots.register(
+					{ name: PANE_SETTINGS_SLOT, key: SETTINGS_NAMESPACE },
+					createPaneSettingsCard(react, controller, subscribe, getSnapshot),
+				),
+			) ?? null;
+		} catch {
+			paneSettingsDisposer = null;
+		}
+	}
+
 	/** 待执行的锚定补偿：档位切换时登记当前选中卡片顶部的视口相对位置，本轮渲染
 	 *  提交后量测该卡新位置并补偿 scrollTop（R-01-021/AC-01）。
 	 *  dsh 0.2.0（T-170 审核）：切回更高档位时窗口经 retain→ready 异步重建，时间线
@@ -3209,6 +3396,11 @@ function apply(ctx) {
 	// 在屏判据阈值：元素 x 超过 -10px 视为在屏内（移动壳层屏外收起抽屉 x 约 -300）
 	const ON_SCREEN_X = -10;
 	function placeToggle() {
+		// 窗格停用：开关本身没有意义（点开也没有窗格可开），先从文档撤出再返回。
+		if (paneOptions.paneEnabled === false) {
+			if (toggle.parentElement !== null) toggle.remove();
+			return;
+		}
 		const seat = document.querySelector(CONVERSATION_SELECTOR);
 		const header = seat !== null ? (seat.querySelector("header") ?? null) : null;
 		const row = header !== null ? (header.firstElementChild ?? null) : null;
@@ -3317,7 +3509,10 @@ function apply(ctx) {
 		}
 		return candidate;
 	}
-	function applyLayout() {
+	/** 中间列布局接管（R-01-008/AC-01、R-01-015）。
+	 *  @param {boolean} forceRelease 为真时无条件清空接管样式（窗格被停用、元素即将
+	 *    从文档里摘掉，没人再负责还原——不还原的话行方向与 flex:1 会留在宿主外壳上）。 */
+	function applyLayout(forceRelease) {
 		const seat = document.querySelector(CONVERSATION_SELECTOR);
 		if (seat === null || seat.parentElement === null) return;
 		const center = seat.parentElement;
@@ -3325,7 +3520,7 @@ function apply(ctx) {
 		// 右栏呈现（position=right）时右栏由宿主自管宽度与让位，本插件不得再接管
 		// 中间列布局：与移动端同一形状——清空既有接管样式、恢复外壳默认列布局。
 		if (desktopQuery.matches && paneDock === "left") desktopWasRow = true;
-		if (!desktopQuery.matches || paneDock === "right") {
+		if (forceRelease === true || !desktopQuery.matches || paneDock === "right") {
 			// 移动端：抽屉脱离文档流（fixed），不参与主会话布局；恢复外壳默认
 			// 列布局，避免行方向扰动移动端主会话显示（R-01-008）。
 			if (center.style.flexDirection !== "") {
@@ -4440,13 +4635,12 @@ function apply(ctx) {
 			if (settingsPop === null) return;
 			for (const input of settingsPop.querySelectorAll("input[data-setting]")) {
 				const key = input.getAttribute("data-setting");
-				const want = key === "position"
-					? paneOptions.position === "right"
-					: key === "recentHidden"
-						? paneOptions.recentHidden === true
-						: paneOptions.recentCollapsible === true;
+				// 复选框口径统一：position 以「是否在右侧」表达，其余字段直接取布尔生效值。
+				const want = key === "position" ? paneOptions.position === "right" : paneOptions[key] === true;
 				if (input.checked !== want) input.checked = want;
 			}
+			// 位置切换按钮的文案随停靠面切换；「窗格总开关」不再参与这里的显隐——
+			// 它已移到宿主插件设置页，窗格在屏时位置切换始终可用。
 			if (dockBtn !== null) {
 				const right = paneOptions.position === "right";
 				dockBtn.setAttribute("aria-label", right ? "面板移回左侧" : "面板移到右侧");
@@ -4458,7 +4652,7 @@ function apply(ctx) {
 			if (settingsPop === null) return;
 			setSettingsOpen(settingsPop.hidden);
 		};
-		/** 复选框 → 生效配置：三项共用一条写入路径（写双通道后驱动一轮渲染）。 */
+		/** 复选框 → 生效配置：四项共用一条写入路径（写双通道后驱动一轮渲染）。 */
 		const onSettingsChange = (event) => {
 			const input = event.target;
 			if (!(input instanceof HTMLInputElement)) return;
@@ -4472,16 +4666,12 @@ function apply(ctx) {
 			} else if (key === "recentHidden") {
 				const next = input.checked === true;
 				paneOptions = { ...paneOptions, recentHidden: next };
-				try {
-					window.localStorage.setItem(RECENT_HIDDEN_STORAGE_KEY, String(next));
-				} catch {}
+				writeStoredBool(RECENT_HIDDEN_STORAGE_KEY, next);
 				writeHostConfig("recentHidden", next);
 			} else if (key === "recentCollapsible") {
 				const next = input.checked === true;
 				paneOptions = { ...paneOptions, recentCollapsible: next };
-				try {
-					window.localStorage.setItem(RECENT_COLLAPSIBLE_STORAGE_KEY, String(next));
-				} catch {}
+				writeStoredBool(RECENT_COLLAPSIBLE_STORAGE_KEY, next);
 				writeHostConfig("recentCollapsible", next);
 			}
 			syncSettingsControls();
@@ -4506,9 +4696,7 @@ function apply(ctx) {
 		const onRecentHeadClick = () => {
 			if (!paneOptions.recentCollapsible) return;
 			paneOptions = { ...paneOptions, recentCollapsed: !paneOptions.recentCollapsed };
-			try {
-				window.localStorage.setItem(RECENT_COLLAPSED_STORAGE_KEY, String(paneOptions.recentCollapsed));
-			} catch {}
+			writeStoredBool(RECENT_COLLAPSED_STORAGE_KEY, paneOptions.recentCollapsed);
 			queueSync();
 		};
 		const onRecentHeadKeydown = (event) => {
@@ -4597,15 +4785,112 @@ function apply(ctx) {
 		};
 	}
 
+	/** 数量标识与等待脉冲同步（抽自 render 的计数段，供折叠早退与完整渲染共用）。
+	 *  n/m 只统计主会话——分子为运行中数、分母为其加等待行动主会话之和
+	 *  （R-01-001/AC-04、AC-05）；空态同样显示 0/0（AC-06）。列表在途时不冒充计数，
+	 *  三处数量标识显示加载指示（R-01-014/AC-06）。悬停 tips 说明分子/分母口径（AC-08）。
+	 *  脉冲由 data-awaiting 承载：任一等待行动（阻塞等待、完成提醒或错误提醒）即脉冲
+	 *  （R-01-002/AC-06，C-037）；底色经 data-tone 跟随等待构成——错误 > 阻塞 > 完成
+	 *  优先级取红/金/绿（C-040、C-043）。
+	 *  @param {Element} pane 窗格根元素
+	 *  @param {string} listState 列表装载状态（loading/ready/error）
+	 *  @param {Array<object>} active 活动区条目
+	 *  @param {string} pulseSurface 脉冲面（rail/header/drawer/toggle）
+	 *  @returns {string} 本帧脉冲签名（调用方负责与上一帧比较后提交） */
+	function syncPaneCounts(pane, listState, active, pulseSurface) {
+		const count = pane.querySelector(".dap-count");
+		const railCount = pane.querySelector(".dap-rail-count");
+		const { waiting, blocked, total } = awaitBadgeStats(active);
+		const badge = countBadgeState(listState, waiting, total, blocked);
+		const badgeTone = awaitBadgeTone(active);
+		for (const el of [count, railCount])
+			if (el !== null) {
+				setCountBadgeContent(el, badge);
+				el.toggleAttribute("data-awaiting", badge.awaiting);
+				if (badge.awaiting && badgeTone !== null) el.setAttribute("data-tone", badgeTone);
+				else el.removeAttribute("data-tone");
+				if (el.getAttribute("aria-label") !== badge.ariaText) el.setAttribute("aria-label", badge.ariaText);
+			}
+		const toggleCount = toggle.querySelector(".dap-toggle-count");
+		if (toggleCount !== null) {
+			setCountBadgeContent(toggleCount, badge);
+			toggle.toggleAttribute("data-awaiting", badge.awaiting);
+			if (badge.awaiting && badgeTone !== null) toggle.setAttribute("data-tone", badgeTone);
+			else toggle.removeAttribute("data-tone");
+		}
+		const nextPulseSignature = JSON.stringify([
+			pulseSurface,
+			active
+				.filter((entry) => entry.kind === "awaiting")
+				.map((entry) => `${entry.id}:${entry.waitClass ?? ""}`)
+				.sort(),
+		]);
+		if (pulseSignature !== nextPulseSignature) {
+			syncAwaitPulse([
+				count,
+				railCount,
+				toggleCount,
+				...pane.querySelectorAll('.dap-card[data-kind="awaiting"] .dap-foot :is(.dap-capsule, .dap-note)'),
+			]);
+		}
+		return nextPulseSignature;
+	}
+
+	/** 窗格停用收口（东家 2026-11-12：停用后左右两列都不出现）：把本轮之前可能还挂在
+	 *  文档里的窗格、浮动开关与遮罩全部撤掉，并还原中间列布局接管。幂等——没有任何
+	 *  残留时只做几次属性判断；每轮只被调用一次（render 的停用分支）。
+	 *  刻意不注销 rightTabDisposer / rightSlotDisposer：宿主 sidebarRightTabs 只提供
+	 *  register、没有运行期注销 API，tab 类型一旦注册就活到插件卸载；正文席位留着的
+	 *  代价为零（正文组件不挂载就什么都不执行），摘掉反而会让重新启用时拿不到正文。
+	 *  空置 tab 的清理交给宿主：用户关掉它，或下个进程启动时本插件不再注册该类型。 */
+	function releasePaneForDisabled() {
+		const pane = document.querySelector(`[${PANE_ATTR}]`);
+		if (pane !== null) {
+			releaseDetachedPaneBinding(true);
+			pane.remove();
+		}
+		renderedPane = null;
+		lastSig = "";
+		lastOptionSig = "";
+		pulseSignature = "";
+		// 浮动开关（<768px 抽屉入口）与遮罩同属窗格呈现，停用即撤；桌面态开关本就
+		// 不呈现，一起移除不会有副作用。
+		if (toggle.parentElement !== null) toggle.remove();
+		backdrop.removeAttribute("data-drawer-open");
+		// 中间列的行方向与 flex:1 是本插件写进宿主外壳的内联样式：没有窗格了必须还原。
+		applyLayout(true);
+	}
+
+	/** 回收已脱手的窗格控件绑定（R1 泄漏修复）。
+	 *  bindPaneControls 在 document 上挂 capture 阶段的 pointerdown/keydown 监听，唯一的
+	 *  解绑入口是 ensurePane 的「换了新窗格」分支与卸载段。窗格被宿主右栏 tab 关闭、
+	 *  或换停靠面时被摘除后，这两条路径都不再执行——绑定就此成为没人解绑的常驻监听。
+	 *  @param {boolean} force 为真时无条件解绑（调用方已确定旧窗格作废）；
+	 *    为假时只在旧窗格已脱离文档（isConnected===false）时解绑，活着的窗格不动。 */
+	function releaseDetachedPaneBinding(force) {
+		if (boundPane === null) return;
+		if (force !== true && boundPane.isConnected === true) return;
+		unbindPaneControls?.();
+		unbindPaneControls = null;
+		paneControlSync = null;
+		boundPane = null;
+	}
+
 	// ---- 窗格容器（conversation 槽座的前置兄弟列；外壳重挂载后重插） ----
 	function ensurePane() {
 		// 开关落位守卫先于窗格守卫：头部行存在与否独立于窗格挂载态（T-160）。
 		placeToggle();
+		// 上一枚窗格可能已被宿主摘除（右栏 tab 被关闭、宿主重排布局）：其控件绑定若仍
+		// 挂在 document 上，本轮不建窗格就没有别的路径能解绑，故先回收一次。
+		releaseDetachedPaneBinding(false);
 		// 帧观察器在 frame 就绪后补挂（外壳重挂载后 frame 为新元素，须重挂）。
 		armFrameObserver();
 		// 停靠面判定先行：position=right 的桌面态把窗格挂进宿主右栏 tab 正文容器
 		// （sidebarRightHost 由右栏正文组件置位）；容器未就绪时不建窗格，等
 		// 宿主右栏渲染后的 queueSync 再建——不会误挂到中间列后又被搬走。
+		// 窗格总开关关闭：左右两列都不建窗格（连左侧也不留残余），停靠面判定与
+		// tab 注册都不再发生——重新打开只能走宿主「插件」页。
+		if (paneOptions.paneEnabled === false) return null;
 		const wantRight = paneOptions.position === "right" && desktopQuery.matches;
 		if (wantRight && sidebarRightHost === null) return null;
 		const seat = document.querySelector(CONVERSATION_SELECTOR);
@@ -4647,6 +4932,8 @@ function apply(ctx) {
 					     活动区/历史区——弹层在 DOM 序里位于段头之前，一旦带上该串就会把
 					     活动区截断在弹层处（实测三个 spec 因此失败）。 -->
 					<div class="dap-settings-pop" hidden>
+						<!-- 窗格总开关不在这个弹层里：停用后窗格本身不存在，弹层也就没有入口，
+						     重新打开只能走宿主「插件」页（plugins.bundle.config 槽）。 -->
 						<label class="dap-settings-row"><input type="checkbox" data-setting="position" /><span>面板停靠到右侧</span></label>
 						<label class="dap-settings-row"><input type="checkbox" data-setting="recentHidden" /><span>隐藏历史区</span></label>
 						<label class="dap-settings-row"><input type="checkbox" data-setting="recentCollapsible" /><span>历史区可折叠</span></label>
@@ -5983,6 +6270,10 @@ function apply(ctx) {
 			alignTrackLayer(layer);
 			return;
 		}
+		// 折叠窄条（桌面 data-collapsed="true"）只靠 CSS display:none 收起滚动区，卡片仍被
+		// 写入 DOM：列表包围盒为 0 时逐卡 getBoundingClientRect 只会量到全 0，纯属浪费。
+		// 列表重新可见由 ResizeObserver 触发重算（trackContext 已在本函数前段更新）。
+		if (list.getBoundingClientRect().height === 0) return;
 		// id 统一按字符串查（buildEntries 的 parentId 已 String 化，而卡片表按原始 id 键控）。
 		const recById = new Map();
 		for (const entry of entries) {
@@ -6699,13 +6990,16 @@ function apply(ctx) {
 		// 重试链目标已成为当前会话（他途到达）即取消，避免过期链条拽回会话。
 		cancelStaleOpenRetries({ currentId, activatedId: lastActivatedId });
 		// 快捷会话切换（R-01-028）：候选 = 活动条目里的主会话，分组沿用 buildEntries
-		// 的既有顺序；当前会话单列末组作为「取消」出口（选中即收起不跳转）。第二行
-		// 只读既有预览，不发起日志读取。当前会话标题取 mainTitle（与卡片同源）。
+		// 的既有顺序；当前会话单列一组（东家 2026-11-12 反馈后置顶呈现）作为「取消」
+		// 出口（选中即收起不跳转）。第二行只读既有预览，不发起日志读取。当前会话的
+		// 标题取 mainTitle、工作区归属取 workspaceInfoForSession——与卡片同源，
+		// 浮层因而不需要额外数据通道（active 里通常没有空闲的当前会话）。
 		const quickSwitchCurrent = currentIdOf(snapshot);
 		quickSwitchOf().publish(
 			active,
 			quickSwitchCurrent,
 			quickSwitchCurrent === null ? "" : mainTitle(snapshot?.byId ?? {}, quickSwitchCurrent),
+			quickSwitchCurrent === null ? null : workspaceInfoForSession(quickSwitchCurrent, workspaceItems, snapshot?.byId ?? {}),
 		);
 		return { snapshot, listState, workspaceItems, active, activeRest, done, recent, now };
 	}
@@ -6716,6 +7010,21 @@ function apply(ctx) {
 		// 合并成一份生效值，随后的停靠面切换与最近历史分支都读它。
 		refreshPaneOptions();
 		syncPaneDock();
+		// 运行期重新启用（宿主插件页把 paneEnabled 改回 true）：apply 期因停用而整段跳过的
+		// 右栏接线在这里补做一次。幂等由 connectSidebarRight 内部守卫保证，paneWiringAttempted
+		// 记「已经尝试过」，避免每轮渲染都去 require("react")。
+		if (paneOptions.paneEnabled !== false && !paneWiringAttempted) {
+			paneWiringAttempted = true;
+			if (rightTabDisposer === null) {
+				try {
+					rightReact();
+					connectSidebarRight();
+				} catch {
+					rightTabDisposer = null;
+					rightSlotDisposer = null;
+				}
+			}
+		}
 		// 右栏 tab 的打开时机（东家 2026-10-14 反馈「点 X 关闭后会自动重开」的修复）：
 		// 只在「本轮停靠面刚从 left 变成 right」时请求打开，绝不每轮重试——用户手动关掉
 		// tab 是明确的意图，插件再打开就是把面板重新推回去。首次装配（启动即右栏）由
@@ -6723,6 +7032,16 @@ function apply(ctx) {
 		if (paneDock === "right" && rightTabNeedsRequest) {
 			rightTabNeedsRequest = false;
 			requestRightTabWithRetry();
+		}
+		// 窗格总开关关闭（含运行期关闭）：把窗格、浮动开关、遮罩一并撤出，并还原中间列
+		// 布局接管——这一步必须在 ensurePane 之前，否则本轮还会先建出一个窗格。
+		if (paneOptions.paneEnabled === false) {
+			releasePaneForDisabled();
+			const disabledModel = deriveActiveModel();
+			// 角标与弹窗照常推进（它们与窗格无关，停用后仍是入口）。
+			syncBadgeSurface(disabledModel.active, disabledModel.done);
+			if (badgeModalOpen) renderBadgeModal();
+			return;
 		}
 		// ---- 活动模型派生（窗格无关的前段） ----
 		// 角标/弹窗与窗格卡片消费同一轮派生结果（R-01-026/AC-03、AC-04）：本段只读宿主
@@ -6802,6 +7121,20 @@ function apply(ctx) {
 		const unreadDoneSig = done.map((entry) => `${entry.id}:${entry.unread === true ? 1 : 0}`).sort();
 		const optionSig = `${paneOptions.recentHidden}|${recentFoldedNow}|${JSON.stringify(unreadDoneSig)}`;
 		if (sig === lastSig && optionSig === lastOptionSig) return;
+		// 折叠窄条态：卡片区整体 display:none，宿主只看得见窄条上的计数与提示。此状态下
+		// 仍逐卡重建 DOM、量取矩形，量的全是 0，写进去也无人可见——整段写入跳过，改由窄条
+		// 自身的计数同步承担可见信息（下方 syncBadgeSurface 已在本函数前段跑过）。
+		// 签名照常提交：已呈现内容与上一轮一致，展开时由 lastSig 的一致性保证不会错配。
+		if (collapsed) {
+			// 窄条唯一可见信息是数量标识与脉冲态：走与完整渲染同一段同步，
+			// 卡片区不重建、不测量。
+			pulseSignature = syncPaneCounts(pane, listState, active, pulseSurface);
+			pane.toggleAttribute("data-collapsed", true);
+			// 刻意不提交 lastSig：本轮没有把卡片 DOM 更新到当前数据，若把签名记成"已渲染"，
+			// 展开时同签名会被短路，卡片永久停在折叠前的旧内容。不提交则每轮都会走到这里，
+			// 代价只是重算一次签名与一次计数同步（数量级与折叠前一致）。
+			return;
+		}
 		const colorByWorkspace = resolveWorkspaceColors(visibleEntries.map((entry) => entry.workspaceKey));
 		// 跨区迁移（双向，R-01-010/AC-07）：DOM 写入前量取旧卡矩形并克隆 ghost。
 		// 三个分区两两可达：活动 ↔ 历史（既有判定逐字保留）、活动 ↔ 已完成（新增分区）、
@@ -7041,47 +7374,7 @@ function apply(ctx) {
 			}
 		}
 
-		// 计数与折叠：n/m 只统计主会话——分子为运行中数、分母为其加等待行动主会话之和
-		// （R-01-001/AC-04、AC-05）；空态同样显示 0/0（AC-06）。列表在途时不冒充计数，
-		// 三处数量标识显示加载指示（R-01-014/AC-06）。悬停 tips 说明分子/分母口径（AC-08）。
-		// 脉冲由 data-awaiting 承载：任一等待行动（阻塞等待、完成提醒或错误提醒）即脉冲
-		// （R-01-002/AC-06，C-037）；底色经 data-tone 跟随等待构成——错误 > 阻塞 > 完成
-		// 优先级取红/金/绿（C-040、C-043）。
-		const count = pane.querySelector(".dap-count");
-		const railCount = pane.querySelector(".dap-rail-count");
-		const { waiting, blocked, total } = awaitBadgeStats(active);
-		const badge = countBadgeState(listState, waiting, total, blocked);
-		const badgeTone = awaitBadgeTone(active);
-		for (const el of [count, railCount])
-			if (el !== null) {
-				setCountBadgeContent(el, badge);
-				el.toggleAttribute("data-awaiting", badge.awaiting);
-				if (badge.awaiting && badgeTone !== null) el.setAttribute("data-tone", badgeTone);
-				else el.removeAttribute("data-tone");
-				if (el.getAttribute("aria-label") !== badge.ariaText) el.setAttribute("aria-label", badge.ariaText);
-			}
-		const toggleCount = toggle.querySelector(".dap-toggle-count");
-		if (toggleCount !== null) {
-			setCountBadgeContent(toggleCount, badge);
-			toggle.toggleAttribute("data-awaiting", badge.awaiting);
-			if (badge.awaiting && badgeTone !== null) toggle.setAttribute("data-tone", badgeTone);
-			else toggle.removeAttribute("data-tone");
-		}
-		const nextPulseSignature = JSON.stringify([
-			pulseSurface,
-			active
-				.filter((entry) => entry.kind === "awaiting")
-				.map((entry) => `${entry.id}:${entry.waitClass ?? ""}`)
-				.sort(),
-		]);
-		if (pulseSignature !== nextPulseSignature) {
-			syncAwaitPulse([
-				count,
-				railCount,
-				toggleCount,
-				...pane.querySelectorAll('.dap-card[data-kind="awaiting"] .dap-foot :is(.dap-capsule, .dap-note)'),
-			]);
-		}
+		const nextPulseSignature = syncPaneCounts(pane, listState, active, pulseSurface);
 		pane.toggleAttribute("data-collapsed", collapsed);
 		const headerExpanded = collapsed ? "false" : "true";
 		if (headerEl !== null && headerEl.getAttribute("aria-expanded") !== headerExpanded)
@@ -7330,8 +7623,18 @@ function apply(ctx) {
 	// 右栏接线前置 require("react") 探测，运行时缺失时退化为仅左列呈现。
 	try {
 		connectHostConfig();
-		rightReact();
-		connectSidebarRight();
+		// 右栏接线的两段前置（react 运行时探测 + tab/席位注册）都只在启用时做：停用态
+		// 连 require("react") 都不发生，右栏成本为零而不只是「少渲染」。
+		// 「已尝试」只在真的尝试过之后置位：启动即停用时不置位，留给 render 的补接线块
+		// 在用户从插件页把窗格打开的那一刻补做一次（否则该项一旦置位就再没机会接线）。
+		if (effectivePaneOption("paneEnabled") !== false) {
+			rightReact();
+			connectSidebarRight();
+			paneWiringAttempted = true;
+		}
+		// 插件页设置卡片：无论窗格启用与否都要挂——它是停用之后唯一能把它开回来的
+		// 入口（窗格本身不在屏，弹层里也就没有入口）。
+		connectPaneSettingsSlot();
 		// 宿主侧栏三状态角标（入口行 + 面板正文）：同样软接线，services 缺席即跳过。
 		connectStatusBadges();
 		// 快捷会话切换（R-01-028）：常驻 Ctrl+Tab 热键 + 居中浮层，不占用宿主槽位；
@@ -7368,6 +7671,10 @@ function apply(ctx) {
 		configUnsubscribe = null;
 		configController = null;
 		hostConfigValue = null;
+		try {
+			paneSettingsDisposer?.();
+		} catch {}
+		paneSettingsDisposer = null;
 		try {
 			rightSlotDisposer?.();
 		} catch {}
@@ -7442,9 +7749,7 @@ function apply(ctx) {
 		recentCardsById.clear();
 		for (const sessionId of openRetryStates.keys()) cancelOpenRetry(sessionId);
 		openRetryStates.clear();
-		unbindPaneControls?.();
-		unbindPaneControls = null;
-		boundPane = null;
+		releaseDetachedPaneBinding(true);
 		renderedPane = null;
 		bodyObserver?.disconnect();
 		disconnectAncestorObservers();

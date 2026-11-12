@@ -1,6 +1,8 @@
-// @description 快捷会话切换（R-01-028）：Ctrl+Tab 唤出的居中浮层，按住 Ctrl 连按 Tab
-//   在候选间循环、松开 Ctrl 即跳转（Alt+Tab 手感）。不占用宿主标题行槽位——宿主的子代理
-//   切换器保持原样，本模块只在 document 上装一个常驻 keydown 监听。
+// @description 快捷会话切换（R-01-028）：Ctrl+Tab 唤出的居中浮层。打开期间 Tab /
+//   Shift+Tab / ↑↓ 循环候选，但**松开 Ctrl 不再自动跳转**（东家 2026-11-12 反馈：
+//   按住 Ctrl 连按会误跳）；确认改为显式动作——再次按下并松开 Ctrl、Enter、或鼠标点行，
+//   Esc 取消。不占用宿主标题行槽位——宿主的子代理切换器保持原样，本模块只在 document
+//   上装一个常驻 keydown/keyup 监听。
 // @author czy
 // @date 2026-11-11
 
@@ -126,13 +128,16 @@ export const QUICK_SWITCH_CSS = `/* ---- 快捷会话切换（新增功能，R-0
 .dap-qs-row[data-tone="error"] .dap-qs-dot { background: #e5534b; }
 .dap-qs-row[data-tone="done"] .dap-qs-dot { background: #3fbf7f; }
 /* 当前会话行：不是「可跳转目标」，而是取消出口（选中即收起、不动当前视图）。
-   用空心圈 + 右侧「当前」角标区分，避免与可跳转行混淆。 */
+   用空心圈 + 右侧「当前」角标区分，避免与可跳转行混淆。该行自 2026-11-12 起也带
+   工作区标签（.dap-qs-ws），并与其它行共用同一套槽位配色变量。 */
 .dap-qs-row[data-current] .dap-qs-dot {
   box-sizing: border-box;
   border: 1.5px solid var(--dsw-alias-label-secondary, #6b7280);
   background: transparent;
 }
-/* 工作区标签（东家 2026-11-11 反馈：与活动卡片一致——放在标题行开头、带槽位配色）。
+/* 「当前」分组置顶（东家 2026-11-12 反馈）：分组在文档序里排最前，段头文案「当前会话」；
+   循环序列仍把它放最后，首按 Tab 先落在可跳转候选上。
+   工作区标签（东家 2026-11-11 反馈：与活动卡片一致——放在标题行开头、带槽位配色）。
    着色公式与活动卡片的 .dap-workspace 同源：读同一组 --dap-workspace-* 自定义属性
    （由 renderQuickSwitch 按行写入），深/浅主题各取一套 L/C，文字用前景色、底色用
    独立背景色、描边用前景色，均在 OKLCH 空间按变体混合强度呈现，前景与背景同色相族。 */
@@ -217,6 +222,46 @@ body:not([data-ds-dark-theme]) .dap-qs-ws {
   font-size: 12px;
   line-height: 17px;
 }
+/* 底部快捷键提示条（东家 2026-11-12 反馈：浮层里要能看到快捷键）。
+   与正文分开：正文可滚动，提示条固定贴在面板底部、不随候选滚动移出视野；
+   只读不点（不参与鼠标交互，也不吃指针事件，避免遮住末行候选的点击）；
+   整条靠右（东家 2026-11-12 追加）：候选与标题都左对齐，说明文字放右边不抢视线。 */
+.dap-qs-footer {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 3px 9px;
+  padding: 6px 11px 5px;
+  border-top: .5px solid var(--dsw-alias-border-l1, rgba(0, 0, 0, .08));
+  color: var(--dsw-alias-label-tertiary, #9aa0a6);
+  /* 比正文小一档：辅助说明不该与候选行争字号（东家 2026-11-12：快捷键信息小一点）。 */
+  font-size: 10px;
+  line-height: 15px;
+  pointer-events: none;
+}
+.dap-qs-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  white-space: nowrap;
+}
+/* 键帽：literal key 走等宽字体，与 macOS/Windows 两套宿主外观都不冲突。 */
+.dap-qs-key {
+  box-sizing: border-box;
+  display: inline-block;
+  min-width: 15px;
+  padding: 0 3px;
+  border: .5px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, .16));
+  border-radius: 4px;
+  background: var(--dsw-alias-interactive-bg-hover, rgba(0, 0, 0, .05));
+  color: var(--dsw-alias-label-secondary, #6b7280);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 9px;
+  line-height: 14px;
+  text-align: center;
+}
 .dap-qs-empty {
   flex: none;
   padding: 16px 12px;
@@ -239,6 +284,18 @@ const HOTKEY_CYCLE_KEYS = new Set([HOTKEY_KEY]);
 /** 退场动画时长（ms）：与 CSS 的 dap-qs-out .13s、dap-qs-veil-out .26s 对齐取上限，
  *  到期才落 hidden——面板「淡出」而非瞬灭，掩盖切换会话的延时。 */
 const QUICK_SWITCH_CLOSE_MS = 260;
+
+/** 浮层底部快捷键提示条（东家 2026-11-12 反馈：浮层里要能看到快捷键）。
+ *  单一事实来源：文案与 onQuickSwitchKeyDown/KeyUp 的键位表一一对应，改键位时
+ *  这张表必须同步改——它是玩家唯一能读到的说明。
+ *  形如 { keys: ["Ctrl", "Tab"], label: "唤出 / 切换" }，keys 渲染成键帽。 */
+const QUICK_SWITCH_HINTS = Object.freeze([
+	{ keys: ["Ctrl", "Tab"], label: "唤出 / 切换" },
+	{ keys: ["↑", "↓"], label: "移动" },
+	{ keys: ["Ctrl"], label: "再按确认" },
+	{ keys: ["Enter"], label: "确认" },
+	{ keys: ["Esc"], label: "取消" },
+]);
 
 /**
  * 构造快捷会话切换器。全部外部依赖以入参注入，模块自身不引用 client.mjs 的闭包变量。
@@ -271,6 +328,10 @@ export function createQuickSwitch(deps) {
 	let quickSwitchOrder = [];
 	/** 当前高亮序号：-1 = 无高亮（刚唤出、还没按过 Tab）。 */
 	let quickSwitchIndex = -1;
+	/** 确认待命（东家 2026-11-12 反馈的交互改造）：唤出那一次按住 Ctrl 的松开是
+	 *  「打开动作的一部分」，不算确认；此后任意一次 Ctrl 按下并松开才算确认提交。
+	 *  置位即表示「打开动作的 Ctrl 已经松过了」，false 时收到的 Ctrl keyup 只置位。 */
+	let quickSwitchConfirmArmed = false;
 	/** 复用单元：id → 行骨架（跨轮只改文本与 tone，不重建节点）。 */
 	const quickSwitchRowUnits = new Map();
 	/** 本帧工作区槽位配色：workspaceKey → { foreground, background }（渲染层只查表）。 */
@@ -329,8 +390,32 @@ export function createQuickSwitch(deps) {
 		return head;
 	}
 
-	/** 惰性建浮层骨架：轻遮罩 + 面板（role=dialog）+ 可滚动正文 + 空态提示。
-	 *  无底部提示条：热键说明改为一次性文档，面板里不再常驻一行文字（东家反馈）。 */
+	/** 底部快捷键提示条（东家 2026-11-12 反馈：浮层里要能直接看到怎么按）。
+	 *  只读装饰：不接指针事件（CSS 侧 pointer-events: none），不参与键盘循环，
+	 *  也不随候选滚动——它贴在面板底部，正文滚动条只滚 .dap-qs-body。
+	 *  文案来自 QUICK_SWITCH_HINTS，与按键分派同源。 */
+	function createQuickSwitchFooter() {
+		const footer = makeEl("div", "dap-qs-footer");
+		// 让读屏把这段读成一句说明而不是几个孤立词。
+		footer.setAttribute("role", "note");
+		for (const hint of QUICK_SWITCH_HINTS) {
+			const item = makeEl("span", "dap-qs-hint");
+			for (const key of hint.keys) {
+				const cap = makeEl("kbd", "dap-qs-key");
+				cap.textContent = key;
+				item.append(cap);
+			}
+			const label = makeEl("span", "dap-qs-hint-label");
+			label.textContent = hint.label;
+			item.append(label);
+			footer.append(item);
+		}
+		return footer;
+	}
+
+	/** 惰性建浮层骨架：轻遮罩 + 面板（role=dialog）+ 可滚动正文 + 空态提示 + 快捷键提示条。
+	 *  提示条自 2026-11-12 起常驻（东家要求浮层里能看到快捷键）；此前版本的注释写的是
+	 *  「不再常驻一行文字」，那条口径已被本次需求取代。 */
 	function ensureQuickSwitch() {
 		if (quickSwitchEl !== null && quickSwitchEl.isConnected) return quickSwitchEl;
 		if (quickSwitchVeil === null || !quickSwitchVeil.isConnected) {
@@ -345,10 +430,11 @@ export function createQuickSwitch(deps) {
 		const body = makeEl("div", "dap-qs-body");
 		const empty = makeEl("div", "dap-qs-empty");
 		empty.textContent = "暂无其他会话";
-		menu.append(body);
+		const footer = createQuickSwitchFooter();
+		menu.append(body, footer);
 		document.body.append(menu);
 		quickSwitchEl = menu;
-		quickSwitchEls = { menu, body, empty };
+		quickSwitchEls = { menu, body, empty, footer };
 		return menu;
 	}
 
@@ -415,6 +501,9 @@ export function createQuickSwitch(deps) {
 				(row.current ? cancelOrder : order).push({ id: row.id, el: unit.el });
 			}
 		}
+		// 循环序列：可跳转候选在前、「当前行」（取消出口）在末尾。文档序（上面 desired）
+		// 由 model 决定，当前行置顶——两者刻意不同（东家 2026-11-12 反馈：标签置顶显示，
+		// 但首按 Tab 不该停在取消项上）。
 		quickSwitchOrder = [...order, ...cancelOrder];
 		if (desired.length === 0) desired.push(empty);
 		empty.hidden = desired.length !== 1 || desired[0] !== empty;
@@ -436,8 +525,8 @@ export function createQuickSwitch(deps) {
 		return menu;
 	}
 
-	/** 高亮只改属性：连按 Tab 时不动 DOM 结构，也不抢键盘焦点（焦点留在宿主输入框，
-	 *  松开 Ctrl 后才跳转——Alt+Tab 手感的关键）。 */
+	/** 高亮只改属性：连按 Tab / ↑↓ 时不动 DOM 结构，也不抢键盘焦点（焦点留在宿主输入框，
+	 *  由显式确认动作提交）。 */
 	function paintQuickSwitchHighlight() {
 		for (const [index, entry] of quickSwitchOrder.entries()) {
 			const on = index === quickSwitchIndex;
@@ -450,17 +539,20 @@ export function createQuickSwitch(deps) {
 	}
 
 	/** 发布本帧候选（deriveActiveModel 每轮调用）：条目只做归类，排序沿用 buildEntries；
-	 *  当前会话单列一组「当前会话」排在末尾——它是**取消出口**，选中即收起、不动当前
-	 *  视图（东家 2026-11-11 反馈：不含自身就没法取消）。第二行只读既有预览
-	 *  （memoPreviews / detail.previews），缺就留空——不为浮层触发读取。签名未变即不碰 DOM。 */
-	function publishQuickSwitchCandidates(entries, currentId, currentTitle) {
+	 *  当前会话单列一组「当前会话」并**置顶**（东家 2026-11-12 反馈：当前标签放在最上面
+	 *  显示），它是**取消出口**，选中即收起、不动当前视图（东家 2026-11-11 反馈：不含
+	 *  自身就没法取消）；循环序列里仍排在最后，首按 Tab 不浪费在取消项上。第二行只读
+	 *  既有预览（memoPreviews / detail.previews），缺就留空——不为浮层触发读取。
+	 *  签名未变即不碰 DOM。 */
+	function publishQuickSwitchCandidates(entries, currentId, currentTitle, currentWorkspace) {
 		const groups = switchCandidates(entries, currentId);
 		quickSwitchCurrentId = currentId === null || currentId === undefined ? "" : String(currentId);
 		// 工作区槽位配色：与活动卡片同源（同一 core 纯函数 + 同一组自定义属性名），
 		// 由本帧候选的工作区键一次性解析，行渲染时只写变量、不做二次计算。
-		const colorByWorkspace = resolveWorkspaceColors(
-			[...groups.running, ...groups.waiting, ...groups.completed].map((entry) => entry.workspaceKey),
-		);
+		// 当前会话行现在也带工作区标签，其身份键一并纳入（否则它的胶囊取不到槽位色）。
+		const colorByWorkspace = resolveWorkspaceColors([
+			...groups.running, ...groups.waiting, ...groups.completed,
+		].map((entry) => entry.workspaceKey).concat(currentId === null || currentId === undefined ? [] : [currentWorkspace?.key ?? ""]));
 		quickSwitchColors = colorByWorkspace;
 		const toRow = (entry) => {
 			const detail = getSessionDetails().get(String(entry.id));
@@ -486,28 +578,35 @@ export function createQuickSwitch(deps) {
 			};
 		};
 		// 当前会话行不依赖它是否出现在活动条目里（空闲会话通常不在 active 中）：
-		// 由 currentId + 标题现场合成，保证任何时刻都有取消出口。
+		// 由 currentId + 标题 + 工作区归属现场合成，保证任何时刻都有取消出口。
+		// 工作区由调用方（deriveActiveModel 里的 workspaceInfoForSession）算好传入，
+		// 与活动卡/历史卡同一份归属口径（东家 2026-11-12 反馈：当前会话也要显示
+		// 工作区标签）——本模块不回查会话详情、不新增数据依赖。
 		const currentRow = quickSwitchCurrentId === ""
 			? null
 			: {
 				id: quickSwitchCurrentId,
 				title: String(currentTitle ?? "").trim() || quickSwitchCurrentId,
 				info: "",
-				workspace: "",
-				workspaceKey: "",
+				workspace: String(currentWorkspace?.title ?? "").trim(),
+				workspaceKey: String(currentWorkspace?.key ?? "").trim(),
 				tone: "current",
 				current: true,
 			};
+		// 「当前」分组置顶（东家 2026-11-12 反馈：当前标签放在最上面显示）；循环序列里
+		// 它仍排在末尾（见 renderQuickSwitch 的 order/cancelOrder 分流）——首按 Tab
+		// 不应停在「原地不动」的取消项上。
 		const model = [
+			...(currentRow === null ? [] : [{ tone: "current", label: "当前会话", rows: [currentRow] }]),
 			{ tone: "running", label: "运行中", rows: groups.running.map(toRow) },
 			{ tone: "waiting", label: "等待行动", rows: groups.waiting.map(toRow) },
 			{ tone: "done", label: "已完成", rows: groups.completed.map(toRow) },
-			...(currentRow === null ? [] : [{ tone: "current", label: "当前会话", rows: [currentRow] }]),
 		];
 		// 签名必须含工作区标签与身份键：换了工作区但标题相同也要刷新（AC-12）。
 		const sig = model
 			.map((group) => `${group.tone}:${group.rows.map((row) => `${row.id}\u0000${row.title}\u0000${row.info}\u0000${row.workspace}\u0000${row.workspaceKey}\u0000${row.tone}`).join("\u0001")}`)
 			.join("\u0002");
+		// 当前行的工作区也参与签名（上面 model 已含它），无需额外键。
 		if (sig === quickSwitchModelSig) return;
 		quickSwitchModelSig = sig;
 		quickSwitchModel = model;
@@ -520,6 +619,8 @@ export function createQuickSwitch(deps) {
 		if (quickSwitchOpen) return;
 		quickSwitchOpen = true;
 		quickSwitchIndex = -1;
+		// 唤出本次的 Ctrl 还按着：那次松开只负责「打开」，不算确认（东家 2026-11-12）。
+		quickSwitchConfirmArmed = false;
 		// 上一次退场还没收尾就再次唤出：取消收尾，直接复用现有节点。
 		if (quickSwitchCloseTimer !== null) {
 			clearTimeout(quickSwitchCloseTimer);
@@ -543,6 +644,7 @@ export function createQuickSwitch(deps) {
 		if (!quickSwitchOpen) return;
 		quickSwitchOpen = false;
 		quickSwitchIndex = -1;
+		quickSwitchConfirmArmed = false;
 		paintQuickSwitchHighlight();
 		window.removeEventListener("blur", cancelQuickSwitch);
 		const menu = quickSwitchEl;
@@ -573,9 +675,10 @@ export function createQuickSwitch(deps) {
 		closeQuickSwitch();
 	}
 
-	/** 循环高亮：dir 为 +1 向后、-1 向前（Shift+Tab）。首按时落在第一项上——松手即
-	 *  前往，与 Alt+Tab 一致；候选为空时保持无高亮。顺序里「当前会话」排在末尾，
-	 *  首按 Tab 永远先落到真正可跳转的目标上。 */
+	/** 循环高亮：dir 为 +1 向后、-1 向前（Shift+Tab）。首按时落在第一项上；
+	 *  高亮移动**不**提交，须再按一次 Ctrl / Enter / 点行才前往（东家 2026-11-12）。
+	 *  候选为空时保持无高亮。顺序里「当前会话」排在末尾，首按 Tab 永远先落到
+	 *  真正可跳转的目标上。 */
 	function cycleQuickSwitch(dir) {
 		if (quickSwitchOrder.length === 0) {
 			paintQuickSwitchHighlight();
@@ -587,7 +690,7 @@ export function createQuickSwitch(deps) {
 	}
 
 	/** 提交：跳转到目标会话；目标是**当前会话**或空则不跳转——这就是「选中自身＝取消」
-	 *  的出口（鼠标点行与松开 Ctrl 共用本函数）。 */
+	 *  的出口（鼠标点行、Enter、再次按下并松开 Ctrl 共用本函数）。 */
 	function commitQuickSwitch(explicitId) {
 		const id = typeof explicitId === "string" && explicitId !== ""
 			? explicitId
@@ -599,8 +702,12 @@ export function createQuickSwitch(deps) {
 		openSessionFromBadge(id);
 	}
 
-	/** 常驻热键监听：Ctrl+Tab 唤出并向下循环、Ctrl+Shift+Tab 反向；松开 Ctrl 提交、
-	 *  Esc 取消。捕获期拦截——宿主或浏览器默认的 Tab 焦点转移不得先跑。
+	/** 常驻热键监听（东家 2026-11-12 交互改造后的键位表）：
+	 *   - 未打开：Ctrl+Tab 唤出并向后循环、Ctrl+Shift+Tab 唤出并向前循环；
+	 *   - 已打开：Tab / Shift+Tab / ↓ / ↑ 循环，Enter 确认，Esc 取消，鼠标点行确认；
+	 *   - 已打开：**松开 Ctrl 不提交**（按住 Ctrl 连按 Tab 会误跳），改由「再次按下并
+	 *     松开 Ctrl」确认（见 onQuickSwitchKeyUp）。
+	 *  捕获期拦截——宿主或浏览器默认的 Tab 焦点转移不得先跑。
 	 *  注：纯浏览器标签页里 Ctrl+Tab 被浏览器标签切换抢占，页面收不到该事件；桌面壳
 	 *  的 webview 没有标签栏，热键可用（用户 2026-11-11 拍板仍用 Ctrl+Tab）。 */
 	function onQuickSwitchKeyDown(event) {
@@ -611,27 +718,53 @@ export function createQuickSwitch(deps) {
 			cancelQuickSwitch();
 			return;
 		}
-		// 浮层已开时，方向键同样能移动选中（Ctrl 仍按住）：与 Tab 循环共用同一
-		// cycleQuickSwitch，方向语义统一为「向下 = 向后」。松手提交仍只认 Control
-		// 的 keyup，故按方向键不会被当成确认动作。
-		if (quickSwitchOpen && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
-			event.preventDefault();
-			event.stopPropagation();
-			cycleQuickSwitch(event.key === "ArrowDown" ? 1 : -1);
-			return;
+		if (quickSwitchOpen) {
+			// 浮层打开期间的循环键：Tab / Shift+Tab / ↓ / ↑ 同一条 cycleQuickSwitch，
+			// 方向语义统一为「向下/向后 = +1」。这些键**不**触发确认，只有 Enter、
+			// 再次 Ctrl（keyup）、鼠标点行才提交。
+			if (event.key === "Tab") {
+				event.preventDefault();
+				event.stopPropagation();
+				cycleQuickSwitch(event.shiftKey ? -1 : 1);
+				return;
+			}
+			if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+				event.preventDefault();
+				event.stopPropagation();
+				cycleQuickSwitch(event.key === "ArrowDown" ? 1 : -1);
+				return;
+			}
+			if (event.key === "Enter") {
+				event.preventDefault();
+				event.stopPropagation();
+				commitQuickSwitch();
+				return;
+			}
 		}
 		if (!HOTKEY_CYCLE_KEYS.has(event.key)) return;
 		if (!event.ctrlKey || event.altKey || event.metaKey) return;
 		event.preventDefault();
 		event.stopPropagation();
-		if (!quickSwitchOpen) openQuickSwitch();
+		if (!quickSwitchOpen) {
+			openQuickSwitch();
+			cycleQuickSwitch(event.shiftKey ? -1 : 1);
+			return;
+		}
+		// 已打开时再按 Ctrl+Tab：照常循环（不提交），语义与 Tab 一致。
 		cycleQuickSwitch(event.shiftKey ? -1 : 1);
 	}
 
-	/** 松开 Ctrl 即提交：Alt+Tab 的「松手前往」；其它键的 keyup 不参与。 */
+	/** 松开 Ctrl：**第一次**只把浮层置为「确认待命」（那一下属于打开动作），
+	 *  之后的每一次松开才提交（东家 2026-11-12：「再次点 Ctrl 才算确认」）。
+	 *  注意这里用的是 keyup——按下即提交会让「按住 Ctrl 连按 Tab 再放开」的老习惯
+	 *  在松开瞬间就被误判成确认，按下+松开两拍才是一次完整确认动作。 */
 	function onQuickSwitchKeyUp(event) {
 		if (!quickSwitchOpen) return;
 		if (event.key !== "Control") return;
+		if (!quickSwitchConfirmArmed) {
+			quickSwitchConfirmArmed = true;
+			return;
+		}
 		commitQuickSwitch();
 	}
 

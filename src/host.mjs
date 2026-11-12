@@ -36,20 +36,28 @@ export const name = 'dsh-activity-pane'
 export const inject = ['storageDomain', 'webServer', 'sessionQuery', 'connection']
 
 /** 可配置项（配置通道的 schema 声明，参照 @deepseek-ai/dsh-client-ui-theme 的 Config）：
+ *    - paneEnabled：「启用活动会话窗格」——本插件的总开关。false 时窗格 DOM、右栏 tab
+ *      与正文席位、位置切换入口全部不建立（左右两列都不出现），宿主侧栏角标与
+ *      Ctrl+Tab 快捷切换仍然保留；重新打开只能走宿主「插件」页的设置卡片
+ *      （插件包自己的 configForms 通道，见 src/client.mjs 的 connectPaneSettingsSlot）。
  *    - position：「面板位置」——'left' 停靠会话区左侧、'right' 呈现于宿主右侧栏；
  *    - recentHidden：「隐藏最近历史」——true 时不呈现历史区整段；
  *    - recentCollapsible：「最近历史可折叠」——true 时历史区段头成为折叠开关；
- *    三项均为 .volatile()：改动只更新配置值、不重挂插件，浏览器半侧经 configForms
+ *    四项均为 .volatile()：改动只更新配置值、不重挂插件，浏览器半侧经 configForms
  *    订阅即时生效。
  *    默认值（东家 2026-10-14 反馈后确定）：position='left'、recentHidden=false 等价于
  *    原项目行为；recentCollapsible=true ——「最近历史」默认即可折叠，不再需要先配置。
+ *    paneEnabled=true 等价于既有行为；置 false 是「彻底停掉窗格成本、只留宿主侧栏
+ *    角标与快捷切换」的开关（东家 2026-11-12 需求）。
  *    注意这里的默认值必须与 src/client.mjs 的 PANE_OPTION_DEFAULTS 保持一致：schema 的
  *    default 永远参与解码，宿主侧这个默认会覆盖浏览器侧的兜底常量。
+ *    .description() 的文案由插件设置页卡片自行消费（宿主不自动渲染表单）。
  *    宿主侧不读取配置值：本插件宿主半只做持久事实与广播，配置由浏览器半消费。 */
 export const Config = schemastery.object({
-	position: schemastery.union(['left', 'right']).default('left').volatile(),
-	recentHidden: schemastery.boolean().default(false).volatile(),
-	recentCollapsible: schemastery.boolean().default(true).volatile(),
+	paneEnabled: schemastery.boolean().default(true).volatile().description('启用活动会话窗格：关闭后左右两列都不再出现窗格，宿主侧栏角标与 Ctrl+Tab 快捷切换保留；重新打开请回到本页。'),
+	position: schemastery.union(['left', 'right']).default('left').volatile().description('面板位置：左侧贴会话区，或停靠到宿主右侧栏。'),
+	recentHidden: schemastery.boolean().default(false).volatile().description('隐藏「最近历史」整段。'),
+	recentCollapsible: schemastery.boolean().default(true).volatile().description('「最近历史」可否折叠。'),
 })
 
 const API_PATH = '/dsh-activity-pane/api'

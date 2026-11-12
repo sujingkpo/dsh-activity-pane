@@ -5592,11 +5592,19 @@ assert.ok(
 		quickSwitchSource.includes('if (event.key === "Escape" && quickSwitchOpen)'),
 	"按住 Ctrl 连按 Tab 循环高亮、Shift 反向、松开 Ctrl 提交、Esc 取消（R-01-028/AC-03、AC-08）",
 );
-// 浮层开启期间方向键也能移动选中（Ctrl 仍按住），与 Tab 共用同一循环函数（AC-03）。
+// 浮层开启期间方向键与 Tab 都能移动选中，共用同一循环函数（AC-03）。
 assert.ok(
-	quickSwitchSource.includes('if (quickSwitchOpen && (event.key === "ArrowDown" || event.key === "ArrowUp"))') &&
-		quickSwitchSource.includes('cycleQuickSwitch(event.key === "ArrowDown" ? 1 : -1);'),
-	"浮层开启时上下方向键同样移动选中，不改变松手提交的语义（R-01-028/AC-03）",
+	quickSwitchSource.includes('if (event.key === "ArrowDown" || event.key === "ArrowUp")') &&
+		quickSwitchSource.includes('cycleQuickSwitch(event.key === "ArrowDown" ? 1 : -1);') &&
+		quickSwitchSource.includes('cycleQuickSwitch(event.shiftKey ? -1 : 1);'),
+	"浮层开启时 Tab / Shift+Tab / 上下方向键同样移动选中（R-01-028/AC-03）",
+);
+// 显式确认（AC-04，东家 2026-11-12 交互改造）：松开唤出那一次的 Ctrl 只置位，不提交。
+assert.ok(
+	quickSwitchSource.includes("let quickSwitchConfirmArmed = false;") &&
+		/if \(!quickSwitchConfirmArmed\) \{\s*quickSwitchConfirmArmed = true;\s*return;\s*\}/.test(quickSwitchSource) &&
+		/if \(event\.key === "Enter"\)[\s\S]{0,200}commitQuickSwitch\(\);/.test(quickSwitchSource),
+	"松开 Ctrl 不立即跳转：首次置位、再次 keyup 或 Enter 才提交（R-01-028/AC-04、AC-08）",
 );
 // 高亮不抢焦点（AC-03 的关键手感）：只改属性，不调用 focus。
 assert.ok(
@@ -5621,11 +5629,16 @@ assert.ok(
 		quickSwitchSource.includes('here.textContent = "当前";'),
 	"浮层含当前会话行作为取消出口；选中自身只收起不跳转（R-01-028/AC-10）",
 );
-// 提示条已移除（东家 2026-11-11 反馈）：面板里不得再常驻热键说明。
+// 提示条（东家 2026-11-12 反馈：浮层里要能看到快捷键）：常驻底部、只读不拦指针，
+// 文案与按键分派同源（QUICK_SWITCH_HINTS 一张表），且不参与键盘循环序列。
 assert.ok(
-	!quickSwitchSource.includes("dap-qs-hint") &&
-		!quickSwitchSource.includes("松开 Ctrl 前往"),
-	"面板不再常驻快捷键提示条（R-01-028/AC-02）",
+	quickSwitchSource.includes("const QUICK_SWITCH_HINTS = Object.freeze([") &&
+		quickSwitchSource.includes('{ keys: ["Ctrl", "Tab"], label: "唤出 / 切换" }') &&
+		quickSwitchSource.includes('{ keys: ["Enter"], label: "确认" }') &&
+		quickSwitchSource.includes('makeEl("div", "dap-qs-footer")') &&
+		quickSwitchSource.includes("menu.append(body, footer);") &&
+		quickSwitchSource.includes("pointer-events: none;"),
+	"浮层底部常驻快捷键提示条，只读且不拦指针（R-01-028/AC-02）",
 );
 // 工作区标签（AC-12）：取 buildEntries 已算好的 workspaceTitle，空则整块隐藏；
 // 与活动卡片一致——排在标题**之前**、同处标题行，并按工作区身份键着色。
@@ -5676,7 +5689,7 @@ assert.ok(
 // 档位资源纪律：浮层不得为第二行发起读取（R-01-025）。注释里提及这些标识符是为了
 // 说明禁止原因，先剥掉注释行再断言真实调用。
 const qsPublishBody = quickSwitchSource.slice(
-	quickSwitchSource.indexOf("function publishQuickSwitchCandidates(entries, currentId, currentTitle) {"),
+	quickSwitchSource.indexOf("function publishQuickSwitchCandidates(entries, currentId, currentTitle, currentWorkspace) {"),
 	quickSwitchSource.indexOf("function openQuickSwitch() {"),
 );
 const qsPublishCode = qsPublishBody
