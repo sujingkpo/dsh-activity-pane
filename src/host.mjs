@@ -37,8 +37,8 @@ export const inject = ['storageDomain', 'webServer', 'sessionQuery', 'connection
 
 /** 可配置项（配置通道的 schema 声明，参照 @deepseek-ai/dsh-client-ui-theme 的 Config）：
  *    - paneEnabled：「启用活动会话窗格」——本插件的总开关。false 时窗格 DOM、右栏 tab
- *      与正文席位、位置切换入口全部不建立（左右两列都不出现），宿主侧栏角标与
- *      Ctrl+Tab 快捷切换仍然保留；重新打开只能走宿主「插件」页的设置卡片
+ *      类型与正文席位、右栏引导页入口、位置切换入口全部不建立（左右两列都不出现），
+ *      宿主侧栏角标与 Ctrl+Tab 快捷切换仍然保留；重新打开只能走宿主「插件」页的设置卡片
  *      （插件包自己的 configForms 通道，见 src/client.mjs 的 connectPaneSettingsSlot）。
  *    - position：「面板位置」——'left' 停靠会话区左侧、'right' 呈现于宿主右侧栏；
  *    - recentHidden：「隐藏最近历史」——true 时不呈现历史区整段；
@@ -54,7 +54,7 @@ export const inject = ['storageDomain', 'webServer', 'sessionQuery', 'connection
  *    .description() 的文案由插件设置页卡片自行消费（宿主不自动渲染表单）。
  *    宿主侧不读取配置值：本插件宿主半只做持久事实与广播，配置由浏览器半消费。 */
 export const Config = schemastery.object({
-	paneEnabled: schemastery.boolean().default(true).volatile().description('启用活动会话窗格：关闭后左右两列都不再出现窗格，宿主侧栏角标与 Ctrl+Tab 快捷切换保留；重新打开请回到本页。'),
+	paneEnabled: schemastery.boolean().default(true).volatile().description('启用活动会话窗格：关闭后左右两列都不再出现窗格，宿主右侧栏的本插件 tab 与引导页入口一并撤除；宿主侧栏角标与 Ctrl+Tab 快捷切换保留。重新打开请回到本页。'),
 	position: schemastery.union(['left', 'right']).default('left').volatile().description('面板位置：左侧贴会话区，或停靠到宿主右侧栏。'),
 	recentHidden: schemastery.boolean().default(false).volatile().description('隐藏「最近历史」整段。'),
 	recentCollapsible: schemastery.boolean().default(true).volatile().description('「最近历史」可否折叠。'),

@@ -26,6 +26,7 @@ id: T-192
 9. m01586：「当前的标签 也增加边框和颜色」——胶囊改强调蓝底 + 1px 描边，浅色主题换深一档。
 10. m01613：「多余的失焦监听 如果没啥用就移除」——`visibilitychange` 通道删除，只留 `blur` + `pointerdown` + `hasFocus` 复核。
 11. m01643：「如果 ctrl 按下超过 2s，则沿用现在的方式；如果快速按下 ctrl+tab 或 ctrl+shift+tab、ctrl 按下时间不足 2s，则无需再次按下 ctrl 即可跳转」——确认口径按时长分两档（tap / hold）。
+12. m01990：「关闭 启用活动会话窗格, 右侧侧边栏也不再注册入口」——停用时右栏 tab 类型与席位要真的注销（推翻了本任务第 4 条与 C-110 决策 8 的前提，见 C-111）。
 
 ## 差距评估
 
@@ -40,7 +41,7 @@ id: T-192
 1. `src/host.mjs`：`Config` 的 `dockEnabled` 改名 `paneEnabled`（`.default(true).volatile().description(...)`），并为 `position`/`recentHidden`/`recentCollapsible` 各补 `.description()`（插件页卡片与宿主配置面板的提示文案来源）。
 2. `src/client.mjs` 配置面：`DOCK_ENABLED_STORAGE_KEY` → `PANE_ENABLED_STORAGE_KEY`（**键串沿用 `dsh-activity-pane:dock-enabled`**，避免升级丢选择与留孤儿键）；`PANE_OPTION_DEFAULTS.paneEnabled = true`；`effectivePaneOption` 显式 `key === "paneEnabled"` 分支；`syncPaneDock`/`connectSidebarRight` 判据改名。
 3. `ensurePane` 首行：`if (paneOptions.paneEnabled === false) return null;`——停用态**左右都不建窗格**。
-4. 新增 `releasePaneForDisabled()`：摘 `[data-dsh-activity-pane]`、`releaseDetachedPaneBinding(true)`、清 `renderedPane`/`lastSig`/`lastOptionSig`/`pulseSignature`、`toggle.remove()`、`backdrop.removeAttribute("data-drawer-open")`、`applyLayout(true)`。**刻意不注销 `rightTabDisposer`/`rightSlotDisposer`**（宿主 `sidebarRightTabs` 无运行期注销 API）。
+4. 新增 `releasePaneForDisabled()`：摘 `[data-dsh-activity-pane]`、`releaseDetachedPaneBinding(true)`、清 `renderedPane`/`lastSig`/`lastOptionSig`/`pulseSignature`、`toggle.remove()`、`backdrop.removeAttribute("data-drawer-open")`、`applyLayout(true)`。~~**刻意不注销 `rightTabDisposer`/`rightSlotDisposer`**（宿主 `sidebarRightTabs` 无运行期注销 API）~~ —— **该判断已由 C-111 推翻**：宿主 `register` 返回幂等 disposer，右栏注销与残留 tab 清扫改由 `releaseRightDockWiring()`/`sweepRightDockTabs()` 承担，见第 17 条。
 5. `applyLayout(forceRelease)` 新增首参；`placeToggle()` 首行停用早退（先 `toggle.remove()`）。
 6. `render()` 在 `rightTabNeedsRequest` 消费块之后、`ensurePane` 之前插停用收口：`releasePaneForDisabled()` → `deriveActiveModel()` → `syncBadgeSurface()` → `renderBadgeModal()` → `return`。放在 `ensurePane` 之后会先建一帧窗格再撤，肉眼可见闪动。
 7. 插件页设置卡片：新增 `PANE_SETTINGS_SLOT = "plugins.bundle.config"`、`PANE_SETTINGS_CSS`、`createPaneSettingsCard(react, controller, subscribe, getSnapshot)`（`useSyncExternalStore`，`view === "summary"` 返回 null，`controller.set("paneEnabled", !enabled)`）与 `connectPaneSettingsSlot()`。`subscribe`/`getSnapshot` 一次建好、稳定引用（否则 `useSyncExternalStore` 无限重渲染）。
@@ -53,6 +54,8 @@ id: T-192
 14. 两档确认（m01643）：新增 `QUICK_SWITCH_TAP_MS = 2000`；`quickSwitchCtrlDownAt` 在 `Control` 自己的 `keydown`（`!event.repeat`）上打点；`onQuickSwitchKeyUp` 先结算时长（清打点、清定时器）再判 `quickSwitchOpen`——浮层没开时那一下 Ctrl 也要清，否则下次会拿旧时刻算时长；唤出那次松开不足 2s 直接 `commitQuickSwitch()`，否则置 `quickSwitchConfirmArmed` 留在屏上等第二次 Ctrl。提示条 Ctrl 格文案改变量（`QUICK_SWITCH_HINT_TAP_LABEL` / `QUICK_SWITCH_HINT_HOLD_LABEL`），`syncQuickSwitchHintMode()` 按「此刻松开会不会跳」判断；长按不动靠 `armQuickSwitchTapTimer()` 的一次性 `setTimeout` 在跨阈值时补刷，关灯/松开/卸载三处 `clearQuickSwitchTapTimer()`。
 15. 文档：`PRD.md` R-01-029 改写为「窗格总开关」+ 新增 AC-06（插件页卡片）、R-01-028 的概述与 AC-02/03/04/08/10/12 同步新语义、索引行改名；`SOLUTION.md` 追溯表两行改写；`RATIONALE/C-110` 记录十条决策与七条被否方案；`C-109` 保留为历史（append-only，不修改）。
 16. `C:\Users\czy\.dsh\profiles\desktop\cordis.patch.yml` 本插件条目 config 里 `dockEnabled: false` → `paneEnabled: false`（第 139 行）。
+18. 浮层模态遮罩（m02369，C-110 决策 17）：`.dap-qs-veil` 由「退场专用浅暗（`pointer-events: none`、唤出时 `hidden`）」改为常驻模态遮罩——深浅对齐角标弹窗 `.dap-modal-backdrop`（`bg-mask-2` 78% + `blur(3px)`），`openQuickSwitch` 与面板一起显形（先 `hidden = false` 再清 `data-closing`，否则被上一轮退场 `forwards` 动画按在 opacity:0），在屏期间（含退场 260ms）保留指针命中，于是 `onQuickSwitchPointerDown` 删掉「遮罩内 return」分支、也不必 `preventDefault`——点遮罩只收起、不触发背后页面。面板同步对齐角标弹窗尺寸与位置：`width: min(600px, 100vw - 48px)`、`max-height: min(76vh, 640px)`、`left/top: 50%` + `translate(-50%, -50%)`（关键帧一并改双向位移），`aria-modal="true"`。遮罩与面板共用一个收尾定时器。
+19. 右栏入口注销（m01990，C-111）：新增 `rightDockSweptFor`/`rightDockSweepRounds` 状态位、`closeRightDockTabs()`（遍历 `sessions.list` 的 id 调 `sidebar.tabsIn(id)`，命中 `tab.kind === RIGHT_TAB_KIND` 的记录按 `tab.id` 经 `closeIn` 关闭，无 `closeIn` 时退回 `close`）、`sweepRightDockTabs()`（在屏会话一变就重开三轮清扫窗口）、`releaseRightDockWiring()`（关 tab → 摘席位 → 注销类型，两名 disposer 先本地取引用再置空，并复位 `paneWiringAttempted`/`sidebarRightHost`）。停用分支改为 `releaseRightDockWiring()` → `sweepRightDockTabs()` → `releasePaneForDisabled()`；补接线块在重新注册后作废清扫记录。设置卡片说明与 `src/host.mjs` 的 `.description()` 同步补「右栏 tab 与引导页入口一并撤除」。
 
 ## 测试计划
 
@@ -61,17 +64,20 @@ id: T-192
 - 按仓库「全手动验证」策略（AGENTS.md 验证策略章节），E2E 待东家要求再跑。
 - MANUAL：浮层里若当前会话行显示「当前」胶囊（在标题行最前、工作区标签之前）；切到别的窗口再切回来，浮层应当已收起，且失焦期间按 Ctrl+Tab 没有任何反应（不拦截、不弹层）。
 - MANUAL：真实会话里在宿主「插件」页切总开关，确认窗格当场移除/恢复；确认停用后左列无空列、Ctrl+Tab 与角标照常；Ctrl+Tab 连按 Tab 后松开 Ctrl 不跳转，再按 Ctrl 才跳；浮层顶部为带工作区标签的当前会话行；浮层底部常驻一行键位提示（Ctrl+Tab / ↑↓ / Ctrl / Enter / Esc），鼠标划过提示条不拦截点击、Tab 循环不落在提示条上。
+- MANUAL（模态遮罩，m02369）：① Ctrl+Tab 唤出后，浮层背后应整体压暗一档并带轻微模糊（与点角标弹出的明细弹窗同档）；② 点浮层外的暗区：浮层收起，且背后那个位置上的按钮/链接**不得**被触发；③ 再次唤出后浮层位置应在视口正中、宽度与角标明细弹窗一致；④ 遮罩淡出期间（约 0.26s）再点一下暗区，同样不得触发背后的控件。
 - MANUAL（两档确认，m01643）：① 快速点按 Ctrl+Tab 再立刻松开 Ctrl（<2s）→ 直接跳到高亮行，提示条 Ctrl 格显示「松开即跳」；② 按住 Ctrl 不动超过 2s（其间什么都不按）→ 提示条 Ctrl 格**自动**从「松开即跳」变成「再按确认」，此时松开 Ctrl 不跳转，再按一下 Ctrl 才跳；③ 按住 Ctrl 连按 Tab 挑行数秒后松开 → 不跳转，浮层留在屏上；④ 单独按一下 Ctrl（不开浮层）再按 Ctrl+Tab → 仍按新时长判档，不会被上一次的旧时刻粘住。
 
 ## 测试影响
 
 | 需求/AC | 变化类型 | 验证层 | 动作 | 证据/理由 |
 | --- | --- | --- | --- | --- |
-| R-01-029/AC-02 | 语义变更：停用后两列都不呈现 | E2E | rewrite | `e2e/specs/right-dock-toggle.mjs` 第 2 段原断言「窗格仍在左列」与新语义冲突，需改为「`[data-dsh-activity-pane]` 计数 0」并补「中间列内联样式已还原」 |
+| R-01-029/AC-02 | 语义变更（两轮）：①停用后两列都不呈现；②停用同轮注销右栏入口 | E2E + UNIT | rewrite | `e2e/specs/right-dock-toggle.mjs` 第 2 段原断言「窗格仍在左列」与新语义冲突，已改为「`[data-dsh-activity-pane]` 计数 0」+「中间列内联样式已还原」，本轮再补「运行期停用后 `dockTab` 计数 0」；`scripts/check.mjs` 新增四条契约断言（注销收口存在且先于撤窗格、两名 disposer 先取引用再置空、先关 tab 且字段取 `tab.id`、停用期按在屏会话三轮清扫且启用时作废） |
 | R-01-029/AC-06 | 新增：插件页设置卡片 | MANUAL | add | e2e 壳层不加载宿主「插件」页，无法在浏览器用例里导航到该页；改由人工验收清单覆盖 |
 | R-01-028/AC-04 | 语义变更：松开 Ctrl 按时长分两档（短按即跳 / 长按再确认） | MANUAL | update | e2e 无法可靠模拟「按下并松开 Ctrl」的两档时序；人工验收覆盖。`scripts/check.mjs` 对 `QUICK_SWITCH_TAP_MS`、`Control` 打点、tap/hold 两条分支均有硬断言 |
+| R-01-028/AC-13 | 新增：模态遮罩 + 面板尺寸/位置对齐角标弹窗 | UNIT + MANUAL | add | `scripts/check.mjs` 新增四条断言（遮罩深浅 78%+blur(3px)、随面板同进同出、600px 与 `translate(-50%, -50%)`、`aria-modal`）；遮罩「吃掉背后点击」属真实浏览器行为，e2e 壳层可验但本轮按全手动策略未跑，列入 MANUAL |
 | R-01-028/AC-02 | 语义反转：由「不得常驻说明条」改为「底部常驻键位表」 | UNIT | update | `scripts/check.mjs` 该条断言已反转为必须含 `QUICK_SWITCH_HINTS` / `dap-qs-footer` / `menu.append(body, footer)` / `pointer-events: none` |
-| R-01-029/AC-01、AC-03、AC-04、AC-05 | 无变化 | E2E | keep | 既有断言仍成立 |
+| R-01-029/AC-04 | 语义扩充：重新启用须重新注册 tab 类型并重开 tab | E2E | keep | 第 5 段既有断言「重新启用后窗格回到右栏」即覆盖（重注册失败则该断言必失败）；`scripts/check.mjs` 另有「注销收口复位 `paneWiringAttempted`」断言 |
+| R-01-029/AC-01、AC-03、AC-05 | 无变化 | E2E | keep | 既有断言仍成立 |
 | Config schema | 字段改名 + 补 description | UNIT | none | `scripts/check.mjs` 无 Config 断言；缺省值一致性靠人工核对两处 |
 
 ## 终态与证据
@@ -79,8 +85,8 @@ id: T-192
 - 实现: `src/host.mjs`（`paneEnabled` + 四项 `.description()` + 头注释重写）；`src/client.mjs`（改名、`releasePaneForDisabled`、`applyLayout(forceRelease)`、`placeToggle` 早退、`render` 停用收口与补接线块、`PANE_SETTINGS_SLOT`/`PANE_SETTINGS_CSS`/`createPaneSettingsCard`/`connectPaneSettingsSlot`、装配段与 `cleanup`）；`src/quick-switch.mjs`（`quickSwitchConfirmArmed`、按键分派重写、分组顺序、当前行工作区标签）；`.dsh-plugin/client.js` 经 `pnpm build:client` 重建（602166 字节）。
 - 测试: `node --check` 三个源文件 exit 0；`node --check .dsh-plugin/client.js` exit 0；`grep dockEnabled|DOCK_ENABLED src/client.mjs` 零残留。按仓库策略未跑 `pnpm check` 与 E2E。
 - SOLUTION 对照: 追溯表 R-01-028 与 R-01-029 两行已重写，子系统与代码位置与实现一致。
-- commit: 待提交
+- commit: 待提交（本轮右栏注销改动追加在 31913b2 之后，尚未提交）
 - review:
   - 审核方: 自查（对抗性审查口径，按仓库 AGENTS.md 第七条主动构造反例）
   - 问题与修复: 已修三处。(1) 停用收口最初写在 `ensurePane` 之后，反例「运行期关开关」会先建一帧窗格再撤——前移到 `rightTabNeedsRequest` 消费块之后。(2) 卡片最初随 `rightReact()` 一起被 `paneEnabled` 门控，反例「停用后想重新打开」发现唯一的开关入口被自己关掉了——改为无条件挂载。(3) `subscribe`/`getSnapshot` 最初在组件体内每次渲染新建，反例「连续两次渲染」触发 `useSyncExternalStore` 无限重渲染——提到 `connectPaneSettingsSlot()` 里一次建好。
-  - 已知限制: 运行期停用后宿主右栏那个空置 tab 要到下次启动才消失（宿主不提供运行期注销 tab 类型）；`paneEnabled` 的 root 级写入若被 profile 补丁锁定，卡片显示只读提示而非静默失败。
+  - 已知限制: ~~运行期停用后宿主右栏那个空置 tab 要到下次启动才消失（宿主不提供运行期注销 tab 类型）~~ —— 已由 C-111 解决（注销 tab 类型 + 关掉已开 tab + 停用期三轮清扫）；`paneEnabled` 的 root 级写入若被 profile 补丁锁定，卡片显示只读提示而非静默失败。

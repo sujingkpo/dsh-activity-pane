@@ -3036,21 +3036,27 @@ function bindBackdropDismiss(backdrop, dismiss) {
 const QUICK_SWITCH_CSS = `/* ---- 快捷会话切换（新增功能，R-01-028）----
    热键唤出的居中浮层：常态完全不存在（未按热键时连 DOM 都不建），因此不改变宿主标题行、
    面包屑与工具簇的任何像素；浮层 portal 到 body，不受标题区 overflow 裁剪。 */
-/* 轻遮罩：**只在提交之后**出现——浮层先淡出，它同时压一层浅暗并迅速消退，
-   用这 0.2s 盖住「新会话还没画出来」的空档。唤出时不显示（不打扰当前视图），
-   也不拦任何指针事件（本功能不用鼠标关闭）。 */
+/* 模态遮罩（东家 2026-11-12：「quick Switch 弹窗时增加遮罩层」）：与角标弹窗的
+   .dap-modal-backdrop 同一档——78% 的 bg-mask-2 + 3px 背景模糊，浅/深主题都跟随别名。
+   浮层在屏期间它就在屏，并**吃掉**这次点击：点遮罩等于「取消」（规则见下方注释）；
+   浮层收起时与面板同一时刻落 hidden，不单独跑退场动画（省一次定时器与一帧空暗）。 */
 .dap-qs-veil {
   position: fixed;
   inset: 0;
   z-index: 2147482959;
-  opacity: 0;
-  background: color-mix(in srgb, var(--dsw-alias-bg-mask-2, #0b0d12) 45%, transparent);
-  pointer-events: none;
+  background: color-mix(in srgb, var(--dsw-alias-bg-mask-2, #0b0d12) 78%, transparent);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+  animation: dap-qs-veil-in .14s ease-out;
 }
 .dap-qs-veil[hidden] { display: none; }
-.dap-qs-veil[data-closing] { animation: dap-qs-veil-out .26s ease-out forwards; }
+.dap-qs-veil[data-closing] { animation: dap-qs-veil-out .13s ease-in forwards; }
+@keyframes dap-qs-veil-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
 @keyframes dap-qs-veil-out {
-  from { opacity: .55; }
+  from { opacity: 1; }
   to { opacity: 0; }
 }
 .dap-qs-menu {
@@ -3060,12 +3066,13 @@ const QUICK_SWITCH_CSS = `/* ---- 快捷会话切换（新增功能，R-01-028�
   display: flex;
   flex-direction: column;
   left: 50%;
-  top: 14vh;
-  /* 面板宽度：东家 2026-11-11 反馈 336px 显得小气，先放宽到 420，再要求更宽——取
-     560px（接近宿主对话框的 600px 口径），窄视口按 100vw 让位。 */
-  width: 560px;
-  max-width: min(640px, 100vw - 24px);
-  max-height: min(620px, 64vh);
+  top: 50%;
+  /* 位置与尺寸对齐角标弹窗（.dap-modal：600px 宽、视口正中、24px 安全边距），东家
+     2026-11-12 追加要求「大小和点击左侧的活动会话弹窗宽度一样，且居中位置也一样」。
+     高度上限仍取视口 76vh（与 .dap-modal 同一口径），窄视口下按 100vw 让位。 */
+  width: min(600px, 100vw - 48px);
+  max-width: 600px;
+  max-height: min(76vh, 640px);
   padding: 6px;
   overflow: hidden;
   border: .5px solid var(--dsw-alias-border-l1, rgba(0, 0, 0, .08));
@@ -3075,7 +3082,7 @@ const QUICK_SWITCH_CSS = `/* ---- 快捷会话切换（新增功能，R-01-028�
      改取不透明的 bg-layer-2，深浅主题各自给实心底。 */
   background: var(--dsw-alias-bg-layer-2, #ffffff);
   box-shadow: var(--dsw-alias-bg-mask-drop, 0 18px 48px rgba(0, 0, 0, .28));
-  transform: translateX(-50%);
+  transform: translate(-50%, -50%);
   /* 入场/退场过渡（东家 2026-11-11 反馈：切换会话有延时，加过渡掩盖空档）。
      退场由 closeQuickSwitch 打 data-closing 触发，动画跑完才落 hidden。 */
   animation: dap-qs-in .14s cubic-bezier(.2, .8, .3, 1);
@@ -3085,14 +3092,13 @@ const QUICK_SWITCH_CSS = `/* ---- 快捷会话切换（新增功能，R-01-028�
   animation: dap-qs-out .13s ease-in forwards;
 }
 @keyframes dap-qs-in {
-  from { opacity: 0; transform: translateX(-50%) translateY(-6px) scale(.97); }
-  to { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); }
+  from { opacity: 0; transform: translate(-50%, -50%) translateY(-6px) scale(.97); }
+  to { opacity: 1; transform: translate(-50%, -50%) translateY(0) scale(1); }
 }
 @keyframes dap-qs-out {
-  from { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); }
-  to { opacity: 0; transform: translateX(-50%) translateY(-4px) scale(.98); }
+  from { opacity: 1; transform: translate(-50%, -50%) translateY(0) scale(1); }
+  to { opacity: 0; transform: translate(-50%, -50%) translateY(-4px) scale(.98); }
 }
-/* 遮罩不参与入场（唤出时不显示），只在退场段压一层浅暗兜住空档。 */
 /* 降低动效偏好：与仓库既有口径一致，整段关闭（宿主 reduced-motion 同步）。 */
 @media (prefers-reduced-motion: reduce) {
   .dap-qs-menu, .dap-qs-menu[data-closing],
@@ -3322,7 +3328,7 @@ const HOTKEY_KEY = "Tab";
 /** 需要 Ctrl 组合的触发键集合（由 HOTKEY_KEY 派生，保持单一事实来源）。 */
 const HOTKEY_CYCLE_KEYS = new Set([HOTKEY_KEY]);
 
-/** 退场动画时长（ms）：与 CSS 的 dap-qs-out .13s、dap-qs-veil-out .26s 对齐取上限，
+/** 退场动画时长（ms）：与 CSS 的 dap-qs-out .13s、dap-qs-veil-out .13s 对齐取上限，
  *  到期才落 hidden——面板「淡出」而非瞬灭，掩盖切换会话的延时。 */
 const QUICK_SWITCH_CLOSE_MS = 260;
 
@@ -3367,7 +3373,7 @@ function createQuickSwitch(deps) {
 	/** 浮层根节点（惰性创建，body 直系子项）与轻遮罩。 */
 	let quickSwitchEl = null;
 	let quickSwitchEls = null;
-	/** 轻遮罩：只服务切换延时的观感，不接任何指针事件。 */
+	/** 模态遮罩：浮层在屏期间铺满视口（挡住并吃掉底下的点击），点它等同取消。 */
 	let quickSwitchVeil = null;
 	let quickSwitchOpen = false;
 	/** 退场动画的收尾定时器（隐藏 DOM / 摘 data-closing）。 */
@@ -3521,7 +3527,7 @@ function createQuickSwitch(deps) {
 		quickSwitchTapTimer = null;
 	}
 
-	/** 惰性建浮层骨架：轻遮罩 + 面板（role=dialog）+ 可滚动正文 + 空态提示 + 快捷键提示条。
+	/** 惰性建浮层骨架：模态遮罩 + 面板（role=dialog aria-modal）+ 可滚动正文 + 空态提示 + 快捷键提示条。
 	 *  提示条自 2026-11-12 起常驻（东家要求浮层里能看到快捷键）；此前版本的注释写的是
 	 *  「不再常驻一行文字」，那条口径已被本次需求取代。 */
 	function ensureQuickSwitch() {
@@ -3535,6 +3541,8 @@ function createQuickSwitch(deps) {
 		menu.hidden = true;
 		menu.setAttribute("role", "dialog");
 		menu.setAttribute("aria-label", "切换会话");
+		// 模态：遮罩挡住在屏其余部分，语义上如实标注，读屏软件不再念背后内容。
+		menu.setAttribute("aria-modal", "true");
 		const body = makeEl("div", "dap-qs-body");
 		const empty = makeEl("div", "dap-qs-empty");
 		empty.textContent = "暂无其他会话";
@@ -3724,7 +3732,8 @@ function createQuickSwitch(deps) {
 	}
 
 	/** 打开浮层：只在热键按下时发生；打开后不再抢焦点，键盘事件由文档级监听接管。
-	 *  遮罩此刻**不**显形——它只服务退场（切换会话的延时观感），唤出时不该压暗当前视图。 */
+	 *  模态遮罩此刻一起显形并铺满视口（东家 2026-11-12：「quick Switch 弹窗时增加遮罩层」），
+	 *  与角标弹窗的 .dap-modal-backdrop 同一档深浅（78% + 3px 模糊）。 */
 	function openQuickSwitch() {
 		if (quickSwitchOpen) return;
 		quickSwitchOpen = true;
@@ -3741,9 +3750,11 @@ function createQuickSwitch(deps) {
 		const menu = renderQuickSwitch();
 		menu.removeAttribute("data-closing");
 		menu.hidden = false;
+		// 遮罩与面板同进：先落 hidden=false 再清 data-closing，避免上一轮退场的
+		// forwards 动画把 opacity 按在 0（清属性后回到基态 opacity:1）。
 		if (quickSwitchVeil !== null) {
+			quickSwitchVeil.hidden = false;
 			quickSwitchVeil.removeAttribute("data-closing");
-			quickSwitchVeil.hidden = true;
 		}
 		paintQuickSwitchHighlight();
 		// 失焦收口只留两条：窗口 blur（切应用/最小化/宿主切走）+ 点浮层外（pointerdown）。
@@ -3754,8 +3765,8 @@ function createQuickSwitch(deps) {
 	}
 
 	/** 收起浮层：清高亮、摘窗口级监听，先跑退场过渡再落 hidden——切换本身有延时，
-	 *  面板不要「啪」地消失；遮罩同时压一层浅暗（0.26s）盖住新会话尚未画出的空档。
-	 *  重复调用安全。 */
+	 *  面板不要「啪」地消失。遮罩与面板同一节奏淡出，并在同一个定时器里一起落 hidden
+	 *  （不另起定时器：两层各自计时会留一帧「只有遮罩」的暗屏）。重复调用安全。 */
 	function closeQuickSwitch() {
 		if (!quickSwitchOpen) return;
 		quickSwitchOpen = false;
@@ -3772,11 +3783,8 @@ function createQuickSwitch(deps) {
 		const veil = quickSwitchVeil;
 		if (menu === null || menu.hidden) return;
 		menu.setAttribute("data-closing", "");
-		if (veil !== null) {
-			// 遮罩先显形再跑淡出动画：基态 opacity 为 0，只有动画能把浅暗推上去。
-			veil.hidden = false;
-			veil.setAttribute("data-closing", "");
-		}
+		// 遮罩此刻已在屏（打开期间常驻）：给它换成淡出动画即可，不必再动 hidden。
+		if (veil !== null && !veil.hidden) veil.setAttribute("data-closing", "");
 		// 用定时器而非 animationend：reduced-motion 下动画被关掉，事件永不触发，
 		// 面板会永久卡在可见态。定时器与动画时长对齐，两种偏好下都收得住。
 		if (quickSwitchCloseTimer !== null) clearTimeout(quickSwitchCloseTimer);
@@ -3799,15 +3807,15 @@ function createQuickSwitch(deps) {
 	/** 点浮层外任意区域即收起（东家 2026-11-12：「点击了其他区域也算失焦」）。
 	 *  用 pointerdown 而非 click：等 click 落地时宿主按钮的默认动作已经排上队了，
 	 *  我们要在那之前把浮层收掉。捕获期但**不** preventDefault / stopPropagation——
-	 *  用户点哪就点哪，浮层只是顺手收起，不能把这次点击吞掉。
-	 *  屏蔽：面板内部（含行点击，那条路径自己会提交）、轻遮罩（本功能不用它关闭）。 */
+	 *  无需拦截：模态遮罩铺满视口且**整段在屏期间吃指针**（退场那 260ms 也不放开），
+	 *  这次点击根本到不了宿主页面（东家 2026-11-12 追加：「收起浮层，且不触发背后的页面」）。
+	 *  屏蔽：面板内部（含行点击，那条路径自己走提交）。 */
 	function onQuickSwitchPointerDown(event) {
 		if (!quickSwitchOpen) return;
 		const menu = quickSwitchEl;
 		if (menu === null) return;
 		const target = event.target;
 		if (target instanceof Node && menu.contains(target)) return;
-		if (target instanceof Node && quickSwitchVeil !== null && quickSwitchVeil.contains(target)) return;
 		cancelQuickSwitch();
 	}
 
@@ -6190,6 +6198,14 @@ function apply(ctx) {
 	};
 	let rightTabDisposer = null;
 	let rightSlotDisposer = null;
+	/** 已开始清扫残留 tab 的「在屏会话」id（停用期专用）。宿主右栏把 tab 布局持久化在
+	 *  localStorage 的 dsh.sidebar-right.v1.<sessionId> 里，注销 tab 类型不会清掉已存记录：
+	 *  停用期间打开某个会话时，那条旧 tab 会以「无可用查看方式」的空壳复活。故停用期间
+	 *  每换一次在屏会话就清扫（同一会话连续数轮都扫，见 rightDockSweepRounds）。 */
+	let rightDockSweptFor = null;
+	/** 当前在屏会话还要再扫几轮：宿主在 seat 挂载时才采纳 store、恢复持久化布局，
+	 *  这一拍可能晚于「在屏会话变化」的那一轮渲染，只扫一次会漏掉刚复活的空壳 tab。 */
+	let rightDockSweepRounds = 0;
 	/** 插件页设置卡片（窗格总开关）的槽位注销函数。 */
 	let paneSettingsDisposer = null;
 	/** 右栏接线是否已经尝试过（apply 期启用即 true；停用启动时为 false，重新启用补做一次）。 */
@@ -6487,6 +6503,88 @@ function apply(ctx) {
 		// 此处刻意不请求打开：装配期还不知道配置的停靠面（可能仍是 left），而且
 		// 此刻常无在屏会话会被宿主拒绝。真正的打开由 syncPaneDock 的停靠面转换置位、
 		// render 消费（见 rightTabNeedsRequest）——这条路径同时覆盖「启动即右栏」。
+	}
+
+	/** 关掉本插件在宿主右栏留下的 tab（东家 2026-11-12：窗格停用后右栏连入口都不注册）。
+	 *  只注销 tab 类型是不够的：宿主「无注册类型的 tab」是一种被承认的状态（正文渲染
+	 *  「这类内容还没有可用的查看方式」），旧 tab 会以空壳形式继续占着 tab 条，整列也
+	 *  不会收起。关最后一条停靠 tab 时宿主自己会把列收起（client.js 的 closeTab 规约）。
+	 *  closeIn 不在宿主公开接口里（注释标着 "Not part of ISidebarRight"），故先探类型：
+	 *  有 closeIn 就按会话关（非在屏会话也能关），否则退回只作用于在屏会话的 close。 */
+	function closeRightDockTabs() {
+		const sidebar = optionalService("sidebarRight");
+		if (sidebar === null || typeof sidebar.tabsIn !== "function") return;
+		const byId = getSnapshot(sessions, "list")?.byId ?? {};
+		for (const id of Object.keys(byId)) {
+			let tabs = null;
+			try {
+				// tabsIn 只对「已采纳 store」的会话返回记录，未打开的会话一律空数组。
+				tabs = sidebar.tabsIn(id);
+			} catch {
+				continue;
+			}
+			if (!Array.isArray(tabs)) continue;
+			for (const tab of tabs) {
+				// 记录字段是 id（不是 tabId）：tabsIn 直接给出 layout.tabs 的 values。
+				if (tab?.kind !== RIGHT_TAB_KIND || typeof tab.id !== "string") continue;
+				try {
+					if (typeof sidebar.closeIn === "function") sidebar.closeIn(id, tab.id);
+					else sidebar.close?.(tab.id);
+				} catch {
+					/* 无在屏会话时宿主会拒绝：没有可关的列，不必补救 */
+				}
+			}
+		}
+	}
+
+	/** 停用期的残留 tab 清扫：在屏会话一变就重新开一个清扫窗口，窗口内每轮渲染都扫。
+	 *  停用那一刻的清扫盖不住之后才被打开的会话——它们的旧 tab 要等宿主采纳 store、
+	 *  从 localStorage 恢复布局时才复活，而那一拍晚于会话切换本身，故给三轮余量。 */
+	function sweepRightDockTabs() {
+		const currentId = currentIdOf(getSnapshot(sessions, "list"));
+		if (currentId !== rightDockSweptFor) {
+			rightDockSweptFor = currentId;
+			rightDockSweepRounds = 3;
+		}
+		if (rightDockSweepRounds <= 0) return;
+		rightDockSweepRounds -= 1;
+		closeRightDockTabs();
+	}
+
+	/** 右栏入口的注销收口（与 connectSidebarRight 对称）：关掉已打开的 tab、摘掉正文与
+	 *  标题席位、注销 tab 类型。宿主 sidebarRightTabs.register 返回的就是幂等 disposer
+	 *  （dsh-client-ui-sidebar-right/lib/client.js:4905-4933：this.ctx.effect 的清理里
+	 *  从 ids/kinds 撤除并 refresh），调用后 tab 条与引导页都不再列出本插件这一项——
+	 *  也就是说「停用后右栏连入口都不注册」是宿主本来就支持的能力，此前的 C-110 决策 8
+	 *  （刻意不注销）建立在对宿主 API 的误判上。
+	 *  顺序：先关 tab 再摘席位、最后注销类型。关 tab 会让正文组件卸载，此刻席位还在，
+	 *  宿主按正常卸载路径清理；先注销类型则会让 tab 立刻退化成「无可用查看方式」的空壳。
+	 *  幂等：两名 disposer 都为空时直接返回。 */
+	function releaseRightDockWiring() {
+		if (rightTabDisposer === null && rightSlotDisposer === null) return;
+		closeRightDockTabs();
+		if (rightSlotDisposer !== null) {
+			const disposeSlot = rightSlotDisposer;
+			rightSlotDisposer = null;
+			try {
+				disposeSlot();
+			} catch {
+				/* 宿主已卸载槽位：disposer 二次调用无副作用，忽略 */
+			}
+		}
+		if (rightTabDisposer !== null) {
+			const disposeTab = rightTabDisposer;
+			rightTabDisposer = null;
+			try {
+				disposeTab();
+			} catch {
+				/* 同上：幂等 disposer，宿主先撤也不会抛到调用方 */
+			}
+		}
+		// 正文组件已卸载：挂载点引用与「已尝试接线」标记一并复位，重新启用时由 render 的
+		// 补接线块重新注册类型并按需重新打开 tab。
+		sidebarRightHost = null;
+		paneWiringAttempted = false;
 	}
 
 	/** 发起一次右栏 tab 打开请求（幂等：宿主按 contentId 去重，重复打开只是聚焦）。
@@ -7172,7 +7270,7 @@ function apply(ctx) {
 				: unavailable
 					? "宿主未服务本插件命名空间，开关不可用。"
 					: writable
-						? "关闭后左右两列都不再出现窗格；宿主侧栏角标与 Ctrl+Tab 快捷切换保留。已打开的窗格会立即移除。"
+						? "关闭后左右两列都不再出现窗格，宿主右侧栏的本插件 tab 与引导页入口一并撤除；宿主侧栏角标与 Ctrl+Tab 快捷切换保留。重新打开后窗格按保存的位置回来。"
 						: "当前配置只读（由 profile 补丁锁定），只能在文件里修改。";
 			return react.createElement(
 				"section",
@@ -8839,10 +8937,9 @@ function apply(ctx) {
 	/** 窗格停用收口（东家 2026-11-12：停用后左右两列都不出现）：把本轮之前可能还挂在
 	 *  文档里的窗格、浮动开关与遮罩全部撤掉，并还原中间列布局接管。幂等——没有任何
 	 *  残留时只做几次属性判断；每轮只被调用一次（render 的停用分支）。
-	 *  刻意不注销 rightTabDisposer / rightSlotDisposer：宿主 sidebarRightTabs 只提供
-	 *  register、没有运行期注销 API，tab 类型一旦注册就活到插件卸载；正文席位留着的
-	 *  代价为零（正文组件不挂载就什么都不执行），摘掉反而会让重新启用时拿不到正文。
-	 *  空置 tab 的清理交给宿主：用户关掉它，或下个进程启动时本插件不再注册该类型。 */
+	 *  右栏入口的注销**不在这里**：tab 类型与席位的注销、残留 tab 的关闭由
+	 *  releaseRightDockWiring() / sweepRightDockTabs() 承担，调用点在停用分支里本函数的
+	 *  前一步（先关 tab 让正文组件卸载，再撤窗格；顺序反了会多走一条空跑的清理）。 */
 	function releasePaneForDisabled() {
 		const pane = document.querySelector(`[${PANE_ATTR}]`);
 		if (pane !== null) {
@@ -11019,6 +11116,9 @@ function apply(ctx) {
 				try {
 					rightReact();
 					connectSidebarRight();
+					// 停用期间反复换会话攒下的清扫记录一并作废：重新注册后 tab 要能被正常打开。
+					rightDockSweptFor = null;
+					rightDockSweepRounds = 0;
 				} catch {
 					rightTabDisposer = null;
 					rightSlotDisposer = null;
@@ -11036,6 +11136,11 @@ function apply(ctx) {
 		// 窗格总开关关闭（含运行期关闭）：把窗格、浮动开关、遮罩一并撤出，并还原中间列
 		// 布局接管——这一步必须在 ensurePane 之前，否则本轮还会先建出一个窗格。
 		if (paneOptions.paneEnabled === false) {
+			// 右栏入口先注销：关掉已打开的 tab、摘席位、注销 tab 类型。顺序在撤窗格之前——
+			// 关 tab 会卸载正文组件，本插件的窗格此时还挂在右栏宿主里，正好由它自己的
+			// cleanup 摘掉；反过来先撤窗格再关 tab 只会多走一条空跑的清理。
+			releaseRightDockWiring();
+			sweepRightDockTabs();
 			releasePaneForDisabled();
 			const disabledModel = deriveActiveModel();
 			// 角标与弹窗照常推进（它们与窗格无关，停用后仍是入口）。

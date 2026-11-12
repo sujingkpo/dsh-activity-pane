@@ -5,7 +5,8 @@
 // 退回左列」——窗格仍在屏、仍全量渲染。东家要求改为「停用后连左侧也不出现」，且把唯一
 // 开关入口搬到宿主「插件」页（该页无法在 e2e 壳层导航到，故 R-01-029/AC-06 由人工验收
 // 覆盖，见 tasks/T-192 的测试影响表）。本 spec 只钉浏览器内可观测的三件事：
-//   ① 运行期停用：两列都不再有窗格，浮动开关撤出，角标与弹窗照常推进；
+//   ① 运行期停用：两列都不再有窗格，浮动开关撤出，宿主右栏的 tab 与引导页入口一并注销，
+//      角标与弹窗照常推进（东家 2026-11-12 追加 m01990：「右侧侧边栏也不再注册入口」）；
 //   ② 重新启用：窗格回到原位（position 未被写坏）；
 //   ③ 启动即停用（装配期就跳过右栏接线）：宿主右栏根本没有本插件 tab。
 //
@@ -79,6 +80,14 @@ export default async function rightDockToggle({ page, url, assert }) {
 	assert.equal(await page.locator(PANE_SELECTOR).count(), 0, "停用后会话区左列不留窗格（不是退回左列；AC-02）");
 	assert.equal(await page.locator(".dap-toggle").count(), 0, "停用后浮动开关一并撤出（AC-02）");
 	assert.equal(await page.locator(`${PANE_SELECTOR}[data-dap-docked="right"]`).count(), 0, "停用后宿主右栏不再承载窗格（AC-02）");
+	// 入口本身也要消失：注销 tab 类型只是让它变成「无可用查看方式」的空壳，故插件在注销前
+	// 先把已打开的 tab 关掉——tab 条里既没有标题也不再留空壳，整列由宿主自己收起。
+	assert.equal(await dockTab(page).count(), 0, "停用后宿主右栏 tab 条里不再列出「活动会话」（AC-02）");
+	assert.equal(
+		await page.locator("[data-sidebar-right-unavailable]").count(),
+		0,
+		"停用后不留未注册类型的空壳 tab（宿主 tab.unavailable 占位不得出现；AC-02）",
+	);
 	// 中间列布局接管必须还原：行方向与会话座的 flex 分配都是插件写进宿主外壳的内联样式。
 	const centerInline = await page.evaluate((selector) => {
 		const seat = document.querySelector(selector);
@@ -149,4 +158,12 @@ export default async function rightDockToggle({ page, url, assert }) {
 	}, 30_000);
 	assert.equal(await page.locator(PANE_SELECTOR).count(), 0, "启动即停用：两列都不出现窗格（AC-02）");
 	assert.equal(await dockTab(page).count(), 0, "启动即停用：宿主右栏 tab 条里没有本插件的 tab（AC-02）");
+	// 装配期就没注册类型：连引导页里的入口胶囊也不该有（注销与「从未注册」两条路径同口径）。
+	// 宿主入口胶囊的标记是 data-sidebar-right-guide-entry="<kind>"（引导页 tab 本身是
+	// data-sidebar-right-guide）；停用态下右栏可能整列不展开，故只断言胶囊不存在。
+	assert.equal(
+		await page.locator('[data-sidebar-right-guide-entry="dsh-activity-pane"]').count(),
+		0,
+		"启动即停用：宿主右栏引导页里没有本插件入口（AC-02）",
+	);
 }

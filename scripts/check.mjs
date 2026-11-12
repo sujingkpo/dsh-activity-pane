@@ -5769,9 +5769,86 @@ assert.ok(
 	!bundle.includes('document.addEventListener("click"') &&
 		bundle.includes('document.addEventListener("pointerdown", onQuickSwitchPointerDown, true);') &&
 		bundle.includes('document.removeEventListener("pointerdown", onQuickSwitchPointerDown, true);') &&
-		bundle.includes("if (target instanceof Node && menu.contains(target)) return;") &&
-		bundle.includes("if (target instanceof Node && quickSwitchVeil !== null && quickSwitchVeil.contains(target)) return;"),
+		bundle.includes("if (target instanceof Node && menu.contains(target)) return;"),
 	"点外收起只挂 pointerdown 且不拦默认动作，不接管 document 的 click（R-01-028/AC-08）",
+);
+// 模态遮罩（东家 2026-11-12：「quick Switch 弹窗时增加遮罩层」+「收起浮层且不触发背后的页面」）：
+// 深浅与角标弹窗 .dap-modal-backdrop 同档（78% bg-mask-2 + 3px 模糊），随面板同进同出；
+// 在屏期间铺满视口并**吃掉**指针（退场那 260ms 也不放开），所以点外既不必 preventDefault，
+// 也不会把宿主页面的按钮一并点掉。位置与尺寸同样对齐角标弹窗（600px、视口正中）。
+assert.ok(
+	quickSwitchSource.includes("background: color-mix(in srgb, var(--dsw-alias-bg-mask-2, #0b0d12) 78%, transparent);") &&
+		quickSwitchSource.includes("backdrop-filter: blur(3px);") &&
+		quickSwitchSource.includes(".dap-qs-veil[hidden] { display: none; }"),
+	"浮层遮罩与角标弹窗同一档深浅（78% bg-mask-2 + 3px 模糊）（R-01-028/AC-02）",
+);
+assert.ok(
+	bundle.includes("quickSwitchVeil.hidden = false;") &&
+		bundle.includes("if (veil !== null && !veil.hidden) veil.setAttribute(\"data-closing\", \"\");"),
+	"唤出时遮罩随面板一起显形，收起时与面板同步淡出后一并落 hidden（R-01-028/AC-02）",
+);
+assert.ok(
+	quickSwitchSource.includes("width: min(600px, 100vw - 48px);") &&
+		quickSwitchSource.includes("max-height: min(76vh, 640px);") &&
+		quickSwitchSource.includes("transform: translate(-50%, -50%);"),
+	"浮层宽度与居中位置对齐角标弹窗 .dap-modal（600px、视口正中）（R-01-028/AC-02）",
+);
+assert.ok(
+	quickSwitchSource.includes("menu.setAttribute(\"aria-modal\", \"true\");"),
+	"面板按模态语义标注 aria-modal（R-01-028/AC-02）",
+);
+
+// ---- R-01-029/AC-02 停用后右栏连入口都不注册（东家 2026-11-12：右侧侧边栏也不再注册入口）----
+// 宿主 sidebarRightTabs.register 返回的是 ctx.effect 作用域的幂等 disposer
+// （dsh-client-ui-sidebar-right/lib/client.js:4905-4933 从 ids/kinds 撤除并 refresh），
+// 所以「运行期注销 tab 类型」本来就能做到——C-110 决策 8「宿主没有注销 API」是对宿主 API 的误判。
+// 契约层锚定四件事：注销收口存在且被停用分支调用、两名 disposer 都置空（幂等重入）、
+// 已存在的 tab 先关掉（否则退化成「这类内容还没有可用的查看方式」的空壳）、重新启用时能重注册。
+const releaseWiringBody = clientSource.slice(
+	clientSource.indexOf("function releaseRightDockWiring() {"),
+	clientSource.indexOf("function requestRightTab(sidebar)"),
+);
+assert.ok(
+	clientSource.includes("function releaseRightDockWiring() {") &&
+		clientSource.indexOf("function releaseRightDockWiring() {") < clientSource.indexOf("function render() {") &&
+		// 停用分支的第一件事就是注销右栏入口，且排在 releasePaneForDisabled 之前。
+		/if \(paneOptions\.paneEnabled === false\) \{(?:\s*\/\/[^\n]*\n)*\s*releaseRightDockWiring\(\);/.test(clientSource) &&
+		clientSource.indexOf("releaseRightDockWiring();") < clientSource.indexOf("releasePaneForDisabled();"),
+	"停用分支先注销右栏入口（tab 类型与席位）再撤窗格（R-01-029/AC-02）",
+);
+assert.ok(
+	releaseWiringBody.length > 0 &&
+		// 先取本地引用再置空，避免 disposer 抛错时留下永远非 null 的守卫。
+		/const disposeSlot = rightSlotDisposer;\s*rightSlotDisposer = null;/.test(releaseWiringBody) &&
+		/const disposeTab = rightTabDisposer;\s*rightTabDisposer = null;/.test(releaseWiringBody) &&
+		releaseWiringBody.includes("paneWiringAttempted = false;") &&
+		releaseWiringBody.includes("sidebarRightHost = null;"),
+	"注销收口幂等：两名 disposer 先本地取引用再置空，并复位接线标记供重新启用（R-01-029/AC-02、AC-04）",
+);
+// 只注销类型不够：宿主「无注册类型的 tab」是承认状态，旧 tab 会以空壳占着 tab 条。
+const closeTabsBody = clientSource.slice(
+	clientSource.indexOf("function closeRightDockTabs() {"),
+	clientSource.indexOf("function sweepRightDockTabs() {"),
+);
+assert.ok(
+	closeTabsBody.length > 0 &&
+		closeTabsBody.includes('const sidebar = optionalService("sidebarRight");') &&
+		closeTabsBody.includes('typeof sidebar.tabsIn !== "function"') &&
+		// 记录字段是 id（tabsIn 直接给出 layout.tabs 的 values），不是 tabId。
+		closeTabsBody.includes('if (tab?.kind !== RIGHT_TAB_KIND || typeof tab.id !== "string") continue;') &&
+		closeTabsBody.includes("sidebar.closeIn(id, tab.id)") &&
+		closeTabsBody.includes("sidebar.close?.(tab.id)"),
+	"注销前先关掉已存在的本插件 tab，closeIn 缺席时退回 close（R-01-029/AC-02）",
+);
+// 停用那一刻的清扫盖不住之后才打开的会话：宿主在 seat 挂载时才采纳 store、恢复持久化布局。
+assert.ok(
+	clientSource.includes("function sweepRightDockTabs() {") &&
+		clientSource.includes("const currentId = currentIdOf(getSnapshot(sessions, \"list\"));") &&
+		/if \(currentId !== rightDockSweptFor\) \{\s*rightDockSweptFor = currentId;\s*rightDockSweepRounds = 3;/.test(clientSource) &&
+		clientSource.includes("rightDockSweepRounds -= 1;") &&
+		// 重新启用必须作废清扫记录，否则重新注册后 tab 会被当成残留关掉。
+		/rightDockSweptFor = null;\s*rightDockSweepRounds = 0;/.test(clientSource),
+	"停用期按在屏会话变化重开清扫窗口（三轮余量），重新启用时作废（R-01-029/AC-02）",
 );
 
 

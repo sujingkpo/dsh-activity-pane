@@ -12,21 +12,27 @@
 export const QUICK_SWITCH_CSS = `/* ---- 快捷会话切换（新增功能，R-01-028）----
    热键唤出的居中浮层：常态完全不存在（未按热键时连 DOM 都不建），因此不改变宿主标题行、
    面包屑与工具簇的任何像素；浮层 portal 到 body，不受标题区 overflow 裁剪。 */
-/* 轻遮罩：**只在提交之后**出现——浮层先淡出，它同时压一层浅暗并迅速消退，
-   用这 0.2s 盖住「新会话还没画出来」的空档。唤出时不显示（不打扰当前视图），
-   也不拦任何指针事件（本功能不用鼠标关闭）。 */
+/* 模态遮罩（东家 2026-11-12：「quick Switch 弹窗时增加遮罩层」）：与角标弹窗的
+   .dap-modal-backdrop 同一档——78% 的 bg-mask-2 + 3px 背景模糊，浅/深主题都跟随别名。
+   浮层在屏期间它就在屏，并**吃掉**这次点击：点遮罩等于「取消」（规则见下方注释）；
+   浮层收起时与面板同一时刻落 hidden，不单独跑退场动画（省一次定时器与一帧空暗）。 */
 .dap-qs-veil {
   position: fixed;
   inset: 0;
   z-index: 2147482959;
-  opacity: 0;
-  background: color-mix(in srgb, var(--dsw-alias-bg-mask-2, #0b0d12) 45%, transparent);
-  pointer-events: none;
+  background: color-mix(in srgb, var(--dsw-alias-bg-mask-2, #0b0d12) 78%, transparent);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+  animation: dap-qs-veil-in .14s ease-out;
 }
 .dap-qs-veil[hidden] { display: none; }
-.dap-qs-veil[data-closing] { animation: dap-qs-veil-out .26s ease-out forwards; }
+.dap-qs-veil[data-closing] { animation: dap-qs-veil-out .13s ease-in forwards; }
+@keyframes dap-qs-veil-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
 @keyframes dap-qs-veil-out {
-  from { opacity: .55; }
+  from { opacity: 1; }
   to { opacity: 0; }
 }
 .dap-qs-menu {
@@ -36,12 +42,13 @@ export const QUICK_SWITCH_CSS = `/* ---- 快捷会话切换（新增功能，R-0
   display: flex;
   flex-direction: column;
   left: 50%;
-  top: 14vh;
-  /* 面板宽度：东家 2026-11-11 反馈 336px 显得小气，先放宽到 420，再要求更宽——取
-     560px（接近宿主对话框的 600px 口径），窄视口按 100vw 让位。 */
-  width: 560px;
-  max-width: min(640px, 100vw - 24px);
-  max-height: min(620px, 64vh);
+  top: 50%;
+  /* 位置与尺寸对齐角标弹窗（.dap-modal：600px 宽、视口正中、24px 安全边距），东家
+     2026-11-12 追加要求「大小和点击左侧的活动会话弹窗宽度一样，且居中位置也一样」。
+     高度上限仍取视口 76vh（与 .dap-modal 同一口径），窄视口下按 100vw 让位。 */
+  width: min(600px, 100vw - 48px);
+  max-width: 600px;
+  max-height: min(76vh, 640px);
   padding: 6px;
   overflow: hidden;
   border: .5px solid var(--dsw-alias-border-l1, rgba(0, 0, 0, .08));
@@ -51,7 +58,7 @@ export const QUICK_SWITCH_CSS = `/* ---- 快捷会话切换（新增功能，R-0
      改取不透明的 bg-layer-2，深浅主题各自给实心底。 */
   background: var(--dsw-alias-bg-layer-2, #ffffff);
   box-shadow: var(--dsw-alias-bg-mask-drop, 0 18px 48px rgba(0, 0, 0, .28));
-  transform: translateX(-50%);
+  transform: translate(-50%, -50%);
   /* 入场/退场过渡（东家 2026-11-11 反馈：切换会话有延时，加过渡掩盖空档）。
      退场由 closeQuickSwitch 打 data-closing 触发，动画跑完才落 hidden。 */
   animation: dap-qs-in .14s cubic-bezier(.2, .8, .3, 1);
@@ -61,14 +68,13 @@ export const QUICK_SWITCH_CSS = `/* ---- 快捷会话切换（新增功能，R-0
   animation: dap-qs-out .13s ease-in forwards;
 }
 @keyframes dap-qs-in {
-  from { opacity: 0; transform: translateX(-50%) translateY(-6px) scale(.97); }
-  to { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); }
+  from { opacity: 0; transform: translate(-50%, -50%) translateY(-6px) scale(.97); }
+  to { opacity: 1; transform: translate(-50%, -50%) translateY(0) scale(1); }
 }
 @keyframes dap-qs-out {
-  from { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); }
-  to { opacity: 0; transform: translateX(-50%) translateY(-4px) scale(.98); }
+  from { opacity: 1; transform: translate(-50%, -50%) translateY(0) scale(1); }
+  to { opacity: 0; transform: translate(-50%, -50%) translateY(-4px) scale(.98); }
 }
-/* 遮罩不参与入场（唤出时不显示），只在退场段压一层浅暗兜住空档。 */
 /* 降低动效偏好：与仓库既有口径一致，整段关闭（宿主 reduced-motion 同步）。 */
 @media (prefers-reduced-motion: reduce) {
   .dap-qs-menu, .dap-qs-menu[data-closing],
@@ -298,7 +304,7 @@ const HOTKEY_KEY = "Tab";
 /** 需要 Ctrl 组合的触发键集合（由 HOTKEY_KEY 派生，保持单一事实来源）。 */
 const HOTKEY_CYCLE_KEYS = new Set([HOTKEY_KEY]);
 
-/** 退场动画时长（ms）：与 CSS 的 dap-qs-out .13s、dap-qs-veil-out .26s 对齐取上限，
+/** 退场动画时长（ms）：与 CSS 的 dap-qs-out .13s、dap-qs-veil-out .13s 对齐取上限，
  *  到期才落 hidden——面板「淡出」而非瞬灭，掩盖切换会话的延时。 */
 const QUICK_SWITCH_CLOSE_MS = 260;
 
@@ -343,7 +349,7 @@ export function createQuickSwitch(deps) {
 	/** 浮层根节点（惰性创建，body 直系子项）与轻遮罩。 */
 	let quickSwitchEl = null;
 	let quickSwitchEls = null;
-	/** 轻遮罩：只服务切换延时的观感，不接任何指针事件。 */
+	/** 模态遮罩：浮层在屏期间铺满视口（挡住并吃掉底下的点击），点它等同取消。 */
 	let quickSwitchVeil = null;
 	let quickSwitchOpen = false;
 	/** 退场动画的收尾定时器（隐藏 DOM / 摘 data-closing）。 */
@@ -497,7 +503,7 @@ export function createQuickSwitch(deps) {
 		quickSwitchTapTimer = null;
 	}
 
-	/** 惰性建浮层骨架：轻遮罩 + 面板（role=dialog）+ 可滚动正文 + 空态提示 + 快捷键提示条。
+	/** 惰性建浮层骨架：模态遮罩 + 面板（role=dialog aria-modal）+ 可滚动正文 + 空态提示 + 快捷键提示条。
 	 *  提示条自 2026-11-12 起常驻（东家要求浮层里能看到快捷键）；此前版本的注释写的是
 	 *  「不再常驻一行文字」，那条口径已被本次需求取代。 */
 	function ensureQuickSwitch() {
@@ -511,6 +517,8 @@ export function createQuickSwitch(deps) {
 		menu.hidden = true;
 		menu.setAttribute("role", "dialog");
 		menu.setAttribute("aria-label", "切换会话");
+		// 模态：遮罩挡住在屏其余部分，语义上如实标注，读屏软件不再念背后内容。
+		menu.setAttribute("aria-modal", "true");
 		const body = makeEl("div", "dap-qs-body");
 		const empty = makeEl("div", "dap-qs-empty");
 		empty.textContent = "暂无其他会话";
@@ -700,7 +708,8 @@ export function createQuickSwitch(deps) {
 	}
 
 	/** 打开浮层：只在热键按下时发生；打开后不再抢焦点，键盘事件由文档级监听接管。
-	 *  遮罩此刻**不**显形——它只服务退场（切换会话的延时观感），唤出时不该压暗当前视图。 */
+	 *  模态遮罩此刻一起显形并铺满视口（东家 2026-11-12：「quick Switch 弹窗时增加遮罩层」），
+	 *  与角标弹窗的 .dap-modal-backdrop 同一档深浅（78% + 3px 模糊）。 */
 	function openQuickSwitch() {
 		if (quickSwitchOpen) return;
 		quickSwitchOpen = true;
@@ -717,9 +726,11 @@ export function createQuickSwitch(deps) {
 		const menu = renderQuickSwitch();
 		menu.removeAttribute("data-closing");
 		menu.hidden = false;
+		// 遮罩与面板同进：先落 hidden=false 再清 data-closing，避免上一轮退场的
+		// forwards 动画把 opacity 按在 0（清属性后回到基态 opacity:1）。
 		if (quickSwitchVeil !== null) {
+			quickSwitchVeil.hidden = false;
 			quickSwitchVeil.removeAttribute("data-closing");
-			quickSwitchVeil.hidden = true;
 		}
 		paintQuickSwitchHighlight();
 		// 失焦收口只留两条：窗口 blur（切应用/最小化/宿主切走）+ 点浮层外（pointerdown）。
@@ -730,8 +741,8 @@ export function createQuickSwitch(deps) {
 	}
 
 	/** 收起浮层：清高亮、摘窗口级监听，先跑退场过渡再落 hidden——切换本身有延时，
-	 *  面板不要「啪」地消失；遮罩同时压一层浅暗（0.26s）盖住新会话尚未画出的空档。
-	 *  重复调用安全。 */
+	 *  面板不要「啪」地消失。遮罩与面板同一节奏淡出，并在同一个定时器里一起落 hidden
+	 *  （不另起定时器：两层各自计时会留一帧「只有遮罩」的暗屏）。重复调用安全。 */
 	function closeQuickSwitch() {
 		if (!quickSwitchOpen) return;
 		quickSwitchOpen = false;
@@ -748,11 +759,8 @@ export function createQuickSwitch(deps) {
 		const veil = quickSwitchVeil;
 		if (menu === null || menu.hidden) return;
 		menu.setAttribute("data-closing", "");
-		if (veil !== null) {
-			// 遮罩先显形再跑淡出动画：基态 opacity 为 0，只有动画能把浅暗推上去。
-			veil.hidden = false;
-			veil.setAttribute("data-closing", "");
-		}
+		// 遮罩此刻已在屏（打开期间常驻）：给它换成淡出动画即可，不必再动 hidden。
+		if (veil !== null && !veil.hidden) veil.setAttribute("data-closing", "");
 		// 用定时器而非 animationend：reduced-motion 下动画被关掉，事件永不触发，
 		// 面板会永久卡在可见态。定时器与动画时长对齐，两种偏好下都收得住。
 		if (quickSwitchCloseTimer !== null) clearTimeout(quickSwitchCloseTimer);
@@ -775,15 +783,15 @@ export function createQuickSwitch(deps) {
 	/** 点浮层外任意区域即收起（东家 2026-11-12：「点击了其他区域也算失焦」）。
 	 *  用 pointerdown 而非 click：等 click 落地时宿主按钮的默认动作已经排上队了，
 	 *  我们要在那之前把浮层收掉。捕获期但**不** preventDefault / stopPropagation——
-	 *  用户点哪就点哪，浮层只是顺手收起，不能把这次点击吞掉。
-	 *  屏蔽：面板内部（含行点击，那条路径自己会提交）、轻遮罩（本功能不用它关闭）。 */
+	 *  无需拦截：模态遮罩铺满视口且**整段在屏期间吃指针**（退场那 260ms 也不放开），
+	 *  这次点击根本到不了宿主页面（东家 2026-11-12 追加：「收起浮层，且不触发背后的页面」）。
+	 *  屏蔽：面板内部（含行点击，那条路径自己走提交）。 */
 	function onQuickSwitchPointerDown(event) {
 		if (!quickSwitchOpen) return;
 		const menu = quickSwitchEl;
 		if (menu === null) return;
 		const target = event.target;
 		if (target instanceof Node && menu.contains(target)) return;
-		if (target instanceof Node && quickSwitchVeil !== null && quickSwitchVeil.contains(target)) return;
 		cancelQuickSwitch();
 	}
 

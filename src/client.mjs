@@ -2190,6 +2190,14 @@ function apply(ctx) {
 	};
 	let rightTabDisposer = null;
 	let rightSlotDisposer = null;
+	/** 已开始清扫残留 tab 的「在屏会话」id（停用期专用）。宿主右栏把 tab 布局持久化在
+	 *  localStorage 的 dsh.sidebar-right.v1.<sessionId> 里，注销 tab 类型不会清掉已存记录：
+	 *  停用期间打开某个会话时，那条旧 tab 会以「无可用查看方式」的空壳复活。故停用期间
+	 *  每换一次在屏会话就清扫（同一会话连续数轮都扫，见 rightDockSweepRounds）。 */
+	let rightDockSweptFor = null;
+	/** 当前在屏会话还要再扫几轮：宿主在 seat 挂载时才采纳 store、恢复持久化布局，
+	 *  这一拍可能晚于「在屏会话变化」的那一轮渲染，只扫一次会漏掉刚复活的空壳 tab。 */
+	let rightDockSweepRounds = 0;
 	/** 插件页设置卡片（窗格总开关）的槽位注销函数。 */
 	let paneSettingsDisposer = null;
 	/** 右栏接线是否已经尝试过（apply 期启用即 true；停用启动时为 false，重新启用补做一次）。 */
@@ -2487,6 +2495,88 @@ function apply(ctx) {
 		// 此处刻意不请求打开：装配期还不知道配置的停靠面（可能仍是 left），而且
 		// 此刻常无在屏会话会被宿主拒绝。真正的打开由 syncPaneDock 的停靠面转换置位、
 		// render 消费（见 rightTabNeedsRequest）——这条路径同时覆盖「启动即右栏」。
+	}
+
+	/** 关掉本插件在宿主右栏留下的 tab（东家 2026-11-12：窗格停用后右栏连入口都不注册）。
+	 *  只注销 tab 类型是不够的：宿主「无注册类型的 tab」是一种被承认的状态（正文渲染
+	 *  「这类内容还没有可用的查看方式」），旧 tab 会以空壳形式继续占着 tab 条，整列也
+	 *  不会收起。关最后一条停靠 tab 时宿主自己会把列收起（client.js 的 closeTab 规约）。
+	 *  closeIn 不在宿主公开接口里（注释标着 "Not part of ISidebarRight"），故先探类型：
+	 *  有 closeIn 就按会话关（非在屏会话也能关），否则退回只作用于在屏会话的 close。 */
+	function closeRightDockTabs() {
+		const sidebar = optionalService("sidebarRight");
+		if (sidebar === null || typeof sidebar.tabsIn !== "function") return;
+		const byId = getSnapshot(sessions, "list")?.byId ?? {};
+		for (const id of Object.keys(byId)) {
+			let tabs = null;
+			try {
+				// tabsIn 只对「已采纳 store」的会话返回记录，未打开的会话一律空数组。
+				tabs = sidebar.tabsIn(id);
+			} catch {
+				continue;
+			}
+			if (!Array.isArray(tabs)) continue;
+			for (const tab of tabs) {
+				// 记录字段是 id（不是 tabId）：tabsIn 直接给出 layout.tabs 的 values。
+				if (tab?.kind !== RIGHT_TAB_KIND || typeof tab.id !== "string") continue;
+				try {
+					if (typeof sidebar.closeIn === "function") sidebar.closeIn(id, tab.id);
+					else sidebar.close?.(tab.id);
+				} catch {
+					/* 无在屏会话时宿主会拒绝：没有可关的列，不必补救 */
+				}
+			}
+		}
+	}
+
+	/** 停用期的残留 tab 清扫：在屏会话一变就重新开一个清扫窗口，窗口内每轮渲染都扫。
+	 *  停用那一刻的清扫盖不住之后才被打开的会话——它们的旧 tab 要等宿主采纳 store、
+	 *  从 localStorage 恢复布局时才复活，而那一拍晚于会话切换本身，故给三轮余量。 */
+	function sweepRightDockTabs() {
+		const currentId = currentIdOf(getSnapshot(sessions, "list"));
+		if (currentId !== rightDockSweptFor) {
+			rightDockSweptFor = currentId;
+			rightDockSweepRounds = 3;
+		}
+		if (rightDockSweepRounds <= 0) return;
+		rightDockSweepRounds -= 1;
+		closeRightDockTabs();
+	}
+
+	/** 右栏入口的注销收口（与 connectSidebarRight 对称）：关掉已打开的 tab、摘掉正文与
+	 *  标题席位、注销 tab 类型。宿主 sidebarRightTabs.register 返回的就是幂等 disposer
+	 *  （dsh-client-ui-sidebar-right/lib/client.js:4905-4933：this.ctx.effect 的清理里
+	 *  从 ids/kinds 撤除并 refresh），调用后 tab 条与引导页都不再列出本插件这一项——
+	 *  也就是说「停用后右栏连入口都不注册」是宿主本来就支持的能力，此前的 C-110 决策 8
+	 *  （刻意不注销）建立在对宿主 API 的误判上。
+	 *  顺序：先关 tab 再摘席位、最后注销类型。关 tab 会让正文组件卸载，此刻席位还在，
+	 *  宿主按正常卸载路径清理；先注销类型则会让 tab 立刻退化成「无可用查看方式」的空壳。
+	 *  幂等：两名 disposer 都为空时直接返回。 */
+	function releaseRightDockWiring() {
+		if (rightTabDisposer === null && rightSlotDisposer === null) return;
+		closeRightDockTabs();
+		if (rightSlotDisposer !== null) {
+			const disposeSlot = rightSlotDisposer;
+			rightSlotDisposer = null;
+			try {
+				disposeSlot();
+			} catch {
+				/* 宿主已卸载槽位：disposer 二次调用无副作用，忽略 */
+			}
+		}
+		if (rightTabDisposer !== null) {
+			const disposeTab = rightTabDisposer;
+			rightTabDisposer = null;
+			try {
+				disposeTab();
+			} catch {
+				/* 同上：幂等 disposer，宿主先撤也不会抛到调用方 */
+			}
+		}
+		// 正文组件已卸载：挂载点引用与「已尝试接线」标记一并复位，重新启用时由 render 的
+		// 补接线块重新注册类型并按需重新打开 tab。
+		sidebarRightHost = null;
+		paneWiringAttempted = false;
 	}
 
 	/** 发起一次右栏 tab 打开请求（幂等：宿主按 contentId 去重，重复打开只是聚焦）。
@@ -3172,7 +3262,7 @@ function apply(ctx) {
 				: unavailable
 					? "宿主未服务本插件命名空间，开关不可用。"
 					: writable
-						? "关闭后左右两列都不再出现窗格；宿主侧栏角标与 Ctrl+Tab 快捷切换保留。已打开的窗格会立即移除。"
+						? "关闭后左右两列都不再出现窗格，宿主右侧栏的本插件 tab 与引导页入口一并撤除；宿主侧栏角标与 Ctrl+Tab 快捷切换保留。重新打开后窗格按保存的位置回来。"
 						: "当前配置只读（由 profile 补丁锁定），只能在文件里修改。";
 			return react.createElement(
 				"section",
@@ -4839,10 +4929,9 @@ function apply(ctx) {
 	/** 窗格停用收口（东家 2026-11-12：停用后左右两列都不出现）：把本轮之前可能还挂在
 	 *  文档里的窗格、浮动开关与遮罩全部撤掉，并还原中间列布局接管。幂等——没有任何
 	 *  残留时只做几次属性判断；每轮只被调用一次（render 的停用分支）。
-	 *  刻意不注销 rightTabDisposer / rightSlotDisposer：宿主 sidebarRightTabs 只提供
-	 *  register、没有运行期注销 API，tab 类型一旦注册就活到插件卸载；正文席位留着的
-	 *  代价为零（正文组件不挂载就什么都不执行），摘掉反而会让重新启用时拿不到正文。
-	 *  空置 tab 的清理交给宿主：用户关掉它，或下个进程启动时本插件不再注册该类型。 */
+	 *  右栏入口的注销**不在这里**：tab 类型与席位的注销、残留 tab 的关闭由
+	 *  releaseRightDockWiring() / sweepRightDockTabs() 承担，调用点在停用分支里本函数的
+	 *  前一步（先关 tab 让正文组件卸载，再撤窗格；顺序反了会多走一条空跑的清理）。 */
 	function releasePaneForDisabled() {
 		const pane = document.querySelector(`[${PANE_ATTR}]`);
 		if (pane !== null) {
@@ -7019,6 +7108,9 @@ function apply(ctx) {
 				try {
 					rightReact();
 					connectSidebarRight();
+					// 停用期间反复换会话攒下的清扫记录一并作废：重新注册后 tab 要能被正常打开。
+					rightDockSweptFor = null;
+					rightDockSweepRounds = 0;
 				} catch {
 					rightTabDisposer = null;
 					rightSlotDisposer = null;
@@ -7036,6 +7128,11 @@ function apply(ctx) {
 		// 窗格总开关关闭（含运行期关闭）：把窗格、浮动开关、遮罩一并撤出，并还原中间列
 		// 布局接管——这一步必须在 ensurePane 之前，否则本轮还会先建出一个窗格。
 		if (paneOptions.paneEnabled === false) {
+			// 右栏入口先注销：关掉已打开的 tab、摘席位、注销 tab 类型。顺序在撤窗格之前——
+			// 关 tab 会卸载正文组件，本插件的窗格此时还挂在右栏宿主里，正好由它自己的
+			// cleanup 摘掉；反过来先撤窗格再关 tab 只会多走一条空跑的清理。
+			releaseRightDockWiring();
+			sweepRightDockTabs();
 			releasePaneForDisabled();
 			const disabledModel = deriveActiveModel();
 			// 角标与弹窗照常推进（它们与窗格无关，停用后仍是入口）。
