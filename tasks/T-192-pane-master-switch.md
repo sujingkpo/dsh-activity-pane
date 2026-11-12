@@ -25,6 +25,7 @@ id: T-192
 8. m01580：「我点击了其他区域也算失焦」——点浮层外任意区域同样收起（`pointerdown`，不吞事件）。
 9. m01586：「当前的标签 也增加边框和颜色」——胶囊改强调蓝底 + 1px 描边，浅色主题换深一档。
 10. m01613：「多余的失焦监听 如果没啥用就移除」——`visibilitychange` 通道删除，只留 `blur` + `pointerdown` + `hasFocus` 复核。
+11. m01643：「如果 ctrl 按下超过 2s，则沿用现在的方式；如果快速按下 ctrl+tab 或 ctrl+shift+tab、ctrl 按下时间不足 2s，则无需再次按下 ctrl 即可跳转」——确认口径按时长分两档（tap / hold）。
 
 ## 差距评估
 
@@ -49,8 +50,9 @@ id: T-192
 11. `src/quick-switch.mjs`：新增 `quickSwitchConfirmArmed`；`onQuickSwitchKeyUp` 仅 Control 且已置位才 `commitQuickSwitch()`，否则只置位；`onQuickSwitchKeyDown` 支持浮层内 Tab/Shift+Tab/↑↓ 循环、Enter 提交、Esc 取消、已打开时 Ctrl+Tab 只循环；`openQuickSwitch`/`closeQuickSwitch` 重置确认位。
 12. `publishQuickSwitchCandidates` 增第 4 参 `currentWorkspace`，当前行带 `workspace`/`workspaceKey`；`model` 顺序改为 当前 → running → waiting → done；`quickSwitchOrder = [...order, ...cancelOrder]`（循环序当前行在末尾）。`client.mjs` 的 `publish` 调用补 `workspaceInfoForSession(...)`。
 13. 浮层底部提示条：`QUICK_SWITCH_HINTS`（Object.freeze，5 项键位表）+ `createQuickSwitchFooter()`（`div.dap-qs-footer` + `role="note"`，键帽 `kbd.dap-qs-key`、标签 `span.dap-qs-hint-label`）；`menu.append(body, footer)`，footer `flex: none` / `border-top` / `pointer-events: none`，不参与循环序列；字号比正文小一档（10px / 键帽 9px）、`justify-content: flex-end` 整条靠右（东家同日追加「小一点、靠右」）。文案表与按键分派同源，改键位须两处同改（`scripts/check.mjs` 对两者都有硬断言）。
-14. 文档：`PRD.md` R-01-029 改写为「窗格总开关」+ 新增 AC-06（插件页卡片）、R-01-028 的概述与 AC-02/03/04/08/10/12 同步新语义、索引行改名；`SOLUTION.md` 追溯表两行改写；`RATIONALE/C-110` 记录十条决策与七条被否方案；`C-109` 保留为历史（append-only，不修改）。
-15. `C:\Users\czy\.dsh\profiles\desktop\cordis.patch.yml` 本插件条目 config 里 `dockEnabled: false` → `paneEnabled: false`（第 139 行）。
+14. 两档确认（m01643）：新增 `QUICK_SWITCH_TAP_MS = 2000`；`quickSwitchCtrlDownAt` 在 `Control` 自己的 `keydown`（`!event.repeat`）上打点；`onQuickSwitchKeyUp` 先结算时长（清打点、清定时器）再判 `quickSwitchOpen`——浮层没开时那一下 Ctrl 也要清，否则下次会拿旧时刻算时长；唤出那次松开不足 2s 直接 `commitQuickSwitch()`，否则置 `quickSwitchConfirmArmed` 留在屏上等第二次 Ctrl。提示条 Ctrl 格文案改变量（`QUICK_SWITCH_HINT_TAP_LABEL` / `QUICK_SWITCH_HINT_HOLD_LABEL`），`syncQuickSwitchHintMode()` 按「此刻松开会不会跳」判断；长按不动靠 `armQuickSwitchTapTimer()` 的一次性 `setTimeout` 在跨阈值时补刷，关灯/松开/卸载三处 `clearQuickSwitchTapTimer()`。
+15. 文档：`PRD.md` R-01-029 改写为「窗格总开关」+ 新增 AC-06（插件页卡片）、R-01-028 的概述与 AC-02/03/04/08/10/12 同步新语义、索引行改名；`SOLUTION.md` 追溯表两行改写；`RATIONALE/C-110` 记录十条决策与七条被否方案；`C-109` 保留为历史（append-only，不修改）。
+16. `C:\Users\czy\.dsh\profiles\desktop\cordis.patch.yml` 本插件条目 config 里 `dockEnabled: false` → `paneEnabled: false`（第 139 行）。
 
 ## 测试计划
 
@@ -59,6 +61,7 @@ id: T-192
 - 按仓库「全手动验证」策略（AGENTS.md 验证策略章节），E2E 待东家要求再跑。
 - MANUAL：浮层里若当前会话行显示「当前」胶囊（在标题行最前、工作区标签之前）；切到别的窗口再切回来，浮层应当已收起，且失焦期间按 Ctrl+Tab 没有任何反应（不拦截、不弹层）。
 - MANUAL：真实会话里在宿主「插件」页切总开关，确认窗格当场移除/恢复；确认停用后左列无空列、Ctrl+Tab 与角标照常；Ctrl+Tab 连按 Tab 后松开 Ctrl 不跳转，再按 Ctrl 才跳；浮层顶部为带工作区标签的当前会话行；浮层底部常驻一行键位提示（Ctrl+Tab / ↑↓ / Ctrl / Enter / Esc），鼠标划过提示条不拦截点击、Tab 循环不落在提示条上。
+- MANUAL（两档确认，m01643）：① 快速点按 Ctrl+Tab 再立刻松开 Ctrl（<2s）→ 直接跳到高亮行，提示条 Ctrl 格显示「松开即跳」；② 按住 Ctrl 不动超过 2s（其间什么都不按）→ 提示条 Ctrl 格**自动**从「松开即跳」变成「再按确认」，此时松开 Ctrl 不跳转，再按一下 Ctrl 才跳；③ 按住 Ctrl 连按 Tab 挑行数秒后松开 → 不跳转，浮层留在屏上；④ 单独按一下 Ctrl（不开浮层）再按 Ctrl+Tab → 仍按新时长判档，不会被上一次的旧时刻粘住。
 
 ## 测试影响
 
@@ -66,7 +69,7 @@ id: T-192
 | --- | --- | --- | --- | --- |
 | R-01-029/AC-02 | 语义变更：停用后两列都不呈现 | E2E | rewrite | `e2e/specs/right-dock-toggle.mjs` 第 2 段原断言「窗格仍在左列」与新语义冲突，需改为「`[data-dsh-activity-pane]` 计数 0」并补「中间列内联样式已还原」 |
 | R-01-029/AC-06 | 新增：插件页设置卡片 | MANUAL | add | e2e 壳层不加载宿主「插件」页，无法在浏览器用例里导航到该页；改由人工验收清单覆盖 |
-| R-01-028/AC-04 | 语义变更：松开 Ctrl 不跳转 | MANUAL | update | e2e 无法可靠模拟「按下并松开 Ctrl」的两次手势；人工验收覆盖 |
+| R-01-028/AC-04 | 语义变更：松开 Ctrl 按时长分两档（短按即跳 / 长按再确认） | MANUAL | update | e2e 无法可靠模拟「按下并松开 Ctrl」的两档时序；人工验收覆盖。`scripts/check.mjs` 对 `QUICK_SWITCH_TAP_MS`、`Control` 打点、tap/hold 两条分支均有硬断言 |
 | R-01-028/AC-02 | 语义反转：由「不得常驻说明条」改为「底部常驻键位表」 | UNIT | update | `scripts/check.mjs` 该条断言已反转为必须含 `QUICK_SWITCH_HINTS` / `dap-qs-footer` / `menu.append(body, footer)` / `pointer-events: none` |
 | R-01-029/AC-01、AC-03、AC-04、AC-05 | 无变化 | E2E | keep | 既有断言仍成立 |
 | Config schema | 字段改名 + 补 description | UNIT | none | `scripts/check.mjs` 无 Config 断言；缺省值一致性靠人工核对两处 |

@@ -302,14 +302,26 @@ const HOTKEY_CYCLE_KEYS = new Set([HOTKEY_KEY]);
  *  到期才落 hidden——面板「淡出」而非瞬灭，掩盖切换会话的延时。 */
 const QUICK_SWITCH_CLOSE_MS = 260;
 
+/** 快速松开 Ctrl 的判定窗口（ms，东家 2026-11-12 新增的第二档交互）。
+ *  Ctrl 按下到松开不足这么久 → 视为「快速按一下」：这次松开**直接提交**（tap 档）；
+ *  超过这么久 → 沿用旧口径：唤出那一次的松开只置位，须再次 Ctrl / Enter / 点行确认。
+ *  为什么要分档：短按 Ctrl+Tab 是「点一下就走」的肌肉记忆，强制再按一次 Ctrl 反而拖慢；
+ *  长按 Ctrl 时人往往在逐行挑（按住 Ctrl 连按 Tab），松开就跳会误伤。
+ *  2000 与东家原话「超过2s」一致，改这一处即可调整分档。 */
+const QUICK_SWITCH_TAP_MS = 2000;
+
 /** 浮层底部快捷键提示条（东家 2026-11-12 反馈：浮层里要能看到快捷键）。
  *  单一事实来源：文案与 onQuickSwitchKeyDown/KeyUp 的键位表一一对应，改键位时
  *  这张表必须同步改——它是玩家唯一能读到的说明。
- *  形如 { keys: ["Ctrl", "Tab"], label: "唤出 / 切换" }，keys 渲染成键帽。 */
+ *  形如 { keys: ["Ctrl", "Tab"], label: "唤出 / 切换" }，keys 渲染成键帽。
+ *  第三节描述**当前这一下**走哪一档（tap 档「松开即跳」/ hold 档「再按确认」），
+ *  随 Ctrl 按住的时长实时切换（见 syncQuickSwitchHintMode），故文案是变量。 */
+const QUICK_SWITCH_HINT_TAP_LABEL = "松开即跳";
+const QUICK_SWITCH_HINT_HOLD_LABEL = "再按确认";
 const QUICK_SWITCH_HINTS = Object.freeze([
 	{ keys: ["Ctrl", "Tab"], label: "唤出 / 切换" },
 	{ keys: ["↑", "↓"], label: "移动" },
-	{ keys: ["Ctrl"], label: "再按确认" },
+	{ keys: ["Ctrl"], label: QUICK_SWITCH_HINT_HOLD_LABEL, mode: "ctrl" },
 	{ keys: ["Enter"], label: "确认" },
 	{ keys: ["Esc"], label: "取消" },
 ]);
@@ -349,6 +361,12 @@ export function createQuickSwitch(deps) {
 	 *  「打开动作的一部分」，不算确认；此后任意一次 Ctrl 按下并松开才算确认提交。
 	 *  置位即表示「打开动作的 Ctrl 已经松过了」，false 时收到的 Ctrl keyup 只置位。 */
 	let quickSwitchConfirmArmed = false;
+	/** 本次 Ctrl 按下的时刻（Date.now()，ms）：配合 QUICK_SWITCH_TAP_MS 判断这一下是
+	 *  「快速点按」还是「长按」。0 = 当前没有按着 Ctrl（时长未知 → 按 hold 档处理）。 */
+	let quickSwitchCtrlDownAt = 0;
+	/** 跨过 2s 那一刻的翻档定时器：按住 Ctrl 不动时没有事件可依赖，只能靠它把提示条
+	 *  从「松开即跳」改成「再按确认」。 */
+	let quickSwitchTapTimer = null;
 	/** 复用单元：id → 行骨架（跨轮只改文本与 tone，不重建节点）。 */
 	const quickSwitchRowUnits = new Map();
 	/** 本帧工作区槽位配色：workspaceKey → { foreground, background }（渲染层只查表）。 */
@@ -416,8 +434,15 @@ export function createQuickSwitch(deps) {
 		const footer = makeEl("div", "dap-qs-footer");
 		// 让读屏把这段读成一句说明而不是几个孤立词。
 		footer.setAttribute("role", "note");
+		/** 描述「这一下 Ctrl 怎么算确认」的那一格文案节点：随按住的时长改写，
+		 *  故单独留引用（其余键帽的文案是常量，建好不再变）。 */
+		let modeLabel = null;
 		for (const hint of QUICK_SWITCH_HINTS) {
 			const item = makeEl("span", "dap-qs-hint");
+			if (hint.mode === "ctrl") {
+				// 数据属性只是查询锚点（样式仍只认类名），方便定位这一格。
+				item.dataset.mode = hint.mode;
+			}
 			for (const key of hint.keys) {
 				const cap = makeEl("kbd", "dap-qs-key");
 				cap.textContent = key;
@@ -427,8 +452,49 @@ export function createQuickSwitch(deps) {
 			label.textContent = hint.label;
 			item.append(label);
 			footer.append(item);
+			if (hint.mode === "ctrl") modeLabel = label;
 		}
-		return footer;
+		return { footer, modeLabel };
+	}
+
+	/** 提示条第三节的口径：Ctrl 按下不足 QUICK_SWITCH_TAP_MS 就是「松开即跳」，
+	 *  超过则是「再按确认」。只在文案真的变了时写 DOM（syncBadgeSurface 同理）。 */
+	function syncQuickSwitchHintMode() {
+		const label = quickSwitchEls?.modeLabel;
+		if (label === null || label === undefined) return;
+		// 文案跟着「此刻松开 Ctrl 会不会直接跳」走，四态全覆盖：
+		//   · 按着 Ctrl，且（已待命 或 还没到阈值）→ 松开就跳 → 「松开即跳」；
+		//   · 按着 Ctrl 但已超阈值、且尚未待命 → 松开不跳 → 「再按确认」；
+		//   · 没按着 Ctrl（无论是否已待命）→ 都得再按一下 → 「再按确认」。
+		// 待命态下再按住 Ctrl 时，松开一定提交，故只要按着就是「松开即跳」。
+		const held = quickSwitchCtrlDownAt !== 0;
+		const fast = held && Date.now() - quickSwitchCtrlDownAt < QUICK_SWITCH_TAP_MS;
+		const tap = held && (quickSwitchConfirmArmed || fast);
+		const next = tap ? QUICK_SWITCH_HINT_TAP_LABEL : QUICK_SWITCH_HINT_HOLD_LABEL;
+		if (label.textContent !== next) label.textContent = next;
+	}
+
+	/** 长按 Ctrl 不动时没有任何事件可依赖，翻档只能靠定时器：在跨过阈值的瞬间再刷一次。
+	 *  重复调用安全（先清旧的），Ctrl 一松开就清掉。 */
+	function armQuickSwitchTapTimer() {
+		clearQuickSwitchTapTimer();
+		if (quickSwitchCtrlDownAt === 0) return;
+		const remain = QUICK_SWITCH_TAP_MS - (Date.now() - quickSwitchCtrlDownAt);
+		if (remain <= 0) {
+			syncQuickSwitchHintMode();
+			return;
+		}
+		quickSwitchTapTimer = setTimeout(() => {
+			quickSwitchTapTimer = null;
+			syncQuickSwitchHintMode();
+		}, remain);
+	}
+
+	/** 清掉翻档定时器（关灯、松开 Ctrl、卸载都会走到）。 */
+	function clearQuickSwitchTapTimer() {
+		if (quickSwitchTapTimer === null) return;
+		clearTimeout(quickSwitchTapTimer);
+		quickSwitchTapTimer = null;
 	}
 
 	/** 惰性建浮层骨架：轻遮罩 + 面板（role=dialog）+ 可滚动正文 + 空态提示 + 快捷键提示条。
@@ -448,11 +514,11 @@ export function createQuickSwitch(deps) {
 		const body = makeEl("div", "dap-qs-body");
 		const empty = makeEl("div", "dap-qs-empty");
 		empty.textContent = "暂无其他会话";
-		const footer = createQuickSwitchFooter();
+		const { footer, modeLabel } = createQuickSwitchFooter();
 		menu.append(body, footer);
 		document.body.append(menu);
 		quickSwitchEl = menu;
-		quickSwitchEls = { menu, body, empty, footer };
+		quickSwitchEls = { menu, body, empty, footer, modeLabel };
 		return menu;
 	}
 
@@ -490,6 +556,8 @@ export function createQuickSwitch(deps) {
 	function renderQuickSwitch() {
 		const menu = ensureQuickSwitch();
 		const { body, empty } = quickSwitchEls;
+		// 提示条第三节的文案随「这一下 Ctrl 已按住多久」变化，重绘时顺手对齐一次。
+		syncQuickSwitchHintMode();
 		const desired = [];
 		const order = [];
 		// 当前会话行不进循环序列的前段：先循环全部可跳转候选，最后才轮到它
@@ -637,8 +705,10 @@ export function createQuickSwitch(deps) {
 		if (quickSwitchOpen) return;
 		quickSwitchOpen = true;
 		quickSwitchIndex = -1;
-		// 唤出本次的 Ctrl 还按着：那次松开只负责「打开」，不算确认（东家 2026-11-12）。
+		// 唤出本次的 Ctrl 还按着：那次松开按「按住的时长」分两档处理（东家 2026-11-12 二次改造）——
+		// 快速点按（不足 QUICK_SWITCH_TAP_MS）→ 松开即提交；长按 → 只置位，须再按确认。
 		quickSwitchConfirmArmed = false;
+		armQuickSwitchTapTimer();
 		// 上一次退场还没收尾就再次唤出：取消收尾，直接复用现有节点。
 		if (quickSwitchCloseTimer !== null) {
 			clearTimeout(quickSwitchCloseTimer);
@@ -667,6 +737,10 @@ export function createQuickSwitch(deps) {
 		quickSwitchOpen = false;
 		quickSwitchIndex = -1;
 		quickSwitchConfirmArmed = false;
+		// 时长基准与翻档定时器一起清：下次唤出由新的 Ctrl keydown 重新打点。
+		quickSwitchCtrlDownAt = 0;
+		clearQuickSwitchTapTimer();
+		syncQuickSwitchHintMode();
 		paintQuickSwitchHighlight();
 		window.removeEventListener("blur", cancelQuickSwitch);
 		document.removeEventListener("pointerdown", onQuickSwitchPointerDown, true);
@@ -759,6 +833,18 @@ export function createQuickSwitch(deps) {
 			if (quickSwitchOpen) closeQuickSwitch();
 			return;
 		}
+		// Ctrl 按下的时刻：tap / hold 两档的分档基准（东家 2026-11-12 二次改造）。
+		// 打点在 Control 自己的 keydown 上，而不是 Ctrl+Tab 那一刻——用户可能先按住
+		// Ctrl 停一会儿再按 Tab，「Ctrl 按了多久」说的是 Ctrl 本身。
+		// event.repeat 的自动重复不能重置打点，否则按住不放会被反复刷新成 0 秒。
+		if (event.key === "Control" && !event.repeat) {
+			quickSwitchCtrlDownAt = Date.now();
+			if (quickSwitchOpen) {
+				// 浮层已开着又按下 Ctrl（hold 档的「再按一次」）：新的一轮按住重新计时。
+				syncQuickSwitchHintMode();
+				armQuickSwitchTapTimer();
+			}
+		}
 		if (event.key === "Escape" && quickSwitchOpen) {
 			event.preventDefault();
 			event.stopPropagation();
@@ -790,6 +876,8 @@ export function createQuickSwitch(deps) {
 		}
 		if (!HOTKEY_CYCLE_KEYS.has(event.key)) return;
 		if (!event.ctrlKey || event.altKey || event.metaKey) return;
+		// 打点必须在 openQuickSwitch 之前：后者要用「这一刻」决定 arm 哪种确认口径。
+		if (quickSwitchCtrlDownAt === 0) quickSwitchCtrlDownAt = Date.now();
 		event.preventDefault();
 		event.stopPropagation();
 		if (!quickSwitchOpen) {
@@ -801,17 +889,33 @@ export function createQuickSwitch(deps) {
 		cycleQuickSwitch(event.shiftKey ? -1 : 1);
 	}
 
-	/** 松开 Ctrl：**第一次**只把浮层置为「确认待命」（那一下属于打开动作），
-	 *  之后的每一次松开才提交（东家 2026-11-12：「再次点 Ctrl 才算确认」）。
-	 *  注意这里用的是 keyup——按下即提交会让「按住 Ctrl 连按 Tab 再放开」的老习惯
-	 *  在松开瞬间就被误判成确认，按下+松开两拍才是一次完整确认动作。 */
+	/** 松开 Ctrl：两档（东家 2026-11-12 二次改造）。
+	 *   - **tap 档**：本次 Ctrl 按下不足 QUICK_SWITCH_TAP_MS——这是「Ctrl+Tab 点一下就
+	 *     走」的用法，松开直接提交，不必再按一次；
+	 *   - **hold 档**：按住超过阈值（多半在逐行挑）——松开只把浮层置为「确认待命」，
+	 *     仍须再次 Ctrl / Enter / 点行确认。
+	 *  全程用 keyup：按下即判会让「按住 Ctrl 连按 Tab 再放开」的老习惯在按下瞬间就跳。 */
 	function onQuickSwitchKeyUp(event) {
-		if (!quickSwitchOpen) return;
 		if (event.key !== "Control") return;
+		// 先把这一轮的时长结算掉：即使浮层没开（只是单独按了一下 Ctrl），也要把打点
+		// 清干净——留着会让下一次 Ctrl+Tab 拿旧时刻算时长，永远落进 hold 档。
+		const downAt = quickSwitchCtrlDownAt;
+		quickSwitchCtrlDownAt = 0;
+		clearQuickSwitchTapTimer();
+		if (!quickSwitchOpen) return;
 		if (!quickSwitchConfirmArmed) {
+			// 唤出那一次 Ctrl 的松开：按「按下时长」分两档。
 			quickSwitchConfirmArmed = true;
+			const tapped = downAt !== 0 && Date.now() - downAt < QUICK_SWITCH_TAP_MS;
+			if (tapped) {
+				commitQuickSwitch();
+				return;
+			}
+			// hold 档：浮层留在屏上等第二次 Ctrl，提示条同步改回「再按确认」。
+			syncQuickSwitchHintMode();
 			return;
 		}
+		// 「再按一次 Ctrl」的松开：照旧提交（不论这一次按多短）。
 		commitQuickSwitch();
 	}
 
@@ -842,6 +946,9 @@ export function createQuickSwitch(deps) {
 			clearTimeout(quickSwitchCloseTimer);
 			quickSwitchCloseTimer = null;
 		}
+		// 翻档定时器同理：实例已死，留着只会在 2s 后戳一次悬空 DOM。
+		clearQuickSwitchTapTimer();
+		quickSwitchCtrlDownAt = 0;
 		quickSwitchOpen = false;
 		window.removeEventListener("blur", cancelQuickSwitch);
 		document.removeEventListener("pointerdown", onQuickSwitchPointerDown, true);

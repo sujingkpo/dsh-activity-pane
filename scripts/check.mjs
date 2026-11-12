@@ -5599,12 +5599,22 @@ assert.ok(
 		quickSwitchSource.includes('cycleQuickSwitch(event.shiftKey ? -1 : 1);'),
 	"浮层开启时 Tab / Shift+Tab / 上下方向键同样移动选中（R-01-028/AC-03）",
 );
-// 显式确认（AC-04，东家 2026-11-12 交互改造）：松开唤出那一次的 Ctrl 只置位，不提交。
+// 两档确认（AC-04，东家 2026-11-12 交互改造 + 当日晚间「按住超过 2s 才需再按」）：
+// Ctrl 按下不足 QUICK_SWITCH_TAP_MS 就是「快速点按」→ 松开即提交；超过阈值则是长按挑行，
+// 松开只置位待命，仍须再次 Ctrl / Enter / 点行确认。
 assert.ok(
-	quickSwitchSource.includes("let quickSwitchConfirmArmed = false;") &&
-		/if \(!quickSwitchConfirmArmed\) \{\s*quickSwitchConfirmArmed = true;\s*return;\s*\}/.test(quickSwitchSource) &&
+	quickSwitchSource.includes("const QUICK_SWITCH_TAP_MS = 2000;") &&
+		quickSwitchSource.includes("let quickSwitchConfirmArmed = false;") &&
+		quickSwitchSource.includes("let quickSwitchCtrlDownAt = 0;") &&
+		// 打点必须挂在 Control 自己的 keydown 上，且不能被自动重复刷新。
+		/if \(event\.key === "Control" && !event\.repeat\) \{\s*quickSwitchCtrlDownAt = Date\.now\(\);/.test(quickSwitchSource) &&
+		// tap 档：时长够短就直接提交。
+		/const tapped = downAt !== 0 && Date\.now\(\) - downAt < QUICK_SWITCH_TAP_MS;/.test(quickSwitchSource) &&
+		/if \(tapped\) \{[\s\S]{0,80}commitQuickSwitch\(\);/.test(quickSwitchSource) &&
+		// hold 档：留住浮层等第二次 Ctrl。
+		/quickSwitchConfirmArmed = true;\s*const tapped/.test(quickSwitchSource) &&
 		/if \(event\.key === "Enter"\)[\s\S]{0,200}commitQuickSwitch\(\);/.test(quickSwitchSource),
-	"松开 Ctrl 不立即跳转：首次置位、再次 keyup 或 Enter 才提交（R-01-028/AC-04、AC-08）",
+	"Ctrl 快速点按松开即跳转、按住超过 2s 才需再按一次 Ctrl（或 Enter）确认（R-01-028/AC-04、AC-08）",
 );
 // 高亮不抢焦点（AC-03 的关键手感）：只改属性，不调用 focus。
 assert.ok(
@@ -5650,6 +5660,20 @@ assert.ok(
 		quickSwitchSource.includes("menu.append(body, footer);") &&
 		quickSwitchSource.includes("pointer-events: none;"),
 	"浮层底部常驻快捷键提示条，只读且不拦指针（R-01-028/AC-02）",
+);
+// 提示条的确认口径随档位变（AC-02 的配套）：同一格文案在「松开即跳」与「再按确认」之间切换，
+// 长按不动时靠定时器在跨过阈值的瞬间翻档——没有事件可依赖，不能只靠重绘。
+assert.ok(
+	quickSwitchSource.includes('const QUICK_SWITCH_HINT_TAP_LABEL = "松开即跳";') &&
+		quickSwitchSource.includes('const QUICK_SWITCH_HINT_HOLD_LABEL = "再按确认";') &&
+		quickSwitchSource.includes("{ keys: [\"Ctrl\"], label: QUICK_SWITCH_HINT_HOLD_LABEL, mode: \"ctrl\" }") &&
+		quickSwitchSource.includes("function syncQuickSwitchHintMode()") &&
+		quickSwitchSource.includes("function armQuickSwitchTapTimer()") &&
+		quickSwitchSource.includes("function clearQuickSwitchTapTimer()") &&
+		quickSwitchSource.includes("quickSwitchTapTimer = setTimeout(() => {") &&
+		// 关灯与卸载都必须清定时器，否则 2s 后会戳悬空 DOM。
+		/clearQuickSwitchTapTimer\(\);/.test(quickSwitchSource),
+	"提示条的 Ctrl 说明随 tap / hold 两档切换，长按翻档由定时器兜底（R-01-028/AC-02）",
 );
 // 工作区标签（AC-12）：取 buildEntries 已算好的 workspaceTitle，空则整块隐藏；
 // 与活动卡片一致——排在标题**之前**、同处标题行，并按工作区身份键着色。

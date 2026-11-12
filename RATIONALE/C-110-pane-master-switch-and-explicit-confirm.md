@@ -33,6 +33,9 @@ C-109 落地的是「右栏停靠能力开关」（`dockEnabled`）：停用后�
 14. **「点其他区域」也算失焦，但走 `pointerdown` 且不吞事件**：东家 2026-11-12「我点击了其他区域也算失焦」。监听挂 `document` 的捕获期 `pointerdown`，命中面板内部与轻遮罩时直接 return，其余情况 `cancelQuickSwitch()`；**不** `preventDefault`/`stopPropagation`——用户点的那个按钮该响还得响，浮层只是顺手收起。用 `pointerdown` 而非 `click`：等 `click` 落地时宿主按钮的默认动作已经排上队，收浮层会让它晚半拍。**被否**：给浮层加全屏背板吃点击（会挡住宿主界面，且本功能刻意不用遮罩关闭）、`click` + `stopPropagation`（等于吞掉用户那次点击）。
 15. **只保留两条失焦通道，`visibilitychange` 不重复挂**：切标签页/最小化都会先触发 `window` 的 `blur`，`visibilitychange` 与它覆盖同一场景；真漏拍时 `keydown` 首行的 `hasFocus()` 复核仍能兜住。东家 2026-11-12：「多余的失焦监听 如果没啥用就移除」。
 
+16. **确认口径按 Ctrl 的按住时长分两档**（东家 2026-11-12 追加，m01643）：「如果 ctrl 按下超过 2s，则沿用现在的方式；如果快速按下 ctrl+tab（不足 2s）则无需再次按下 ctrl 即可跳转」。落地为 `QUICK_SWITCH_TAP_MS = 2000`。**打点在 `Control` 自己的 `keydown`**（`quickSwitchCtrlDownAt`），而不是 Ctrl+Tab 那一刻——用户可能先按住 Ctrl 停一会儿再按 Tab，语义上的「Ctrl 按了多久」说的是 Ctrl 本身；`event.repeat` 时必须跳过，否则按住不放的自动重复会把基准一路刷新成 0 秒，永远落进 tap 档。分档只在**唤出那一次 Ctrl 的 keyup** 上生效：tap 档直接 `commitQuickSwitch()`；hold 档照旧置 `quickSwitchConfirmArmed`，浮层留在屏上等第二次 Ctrl（此后任何一次 Ctrl 松开不论按多短都提交，不再看时长）。`onQuickSwitchKeyUp` 把结算（清打点、清定时器）提到 `quickSwitchOpen` 判空之前——浮层没开时按的那一下 Ctrl 也必须把打点清掉，留着会让下一次 Ctrl+Tab 拿旧时刻算时长、永远落进 hold 档。**被否**：另起一个计时器在 2s 时「锁定」这次输入（多一个状态位，且用户松开时还要回查锁是否成立）、用 `Ctrl+Tab` 的 keydown 作基准（先按住 Ctrl 再按 Tab 的用法会被误判成 tap）、按下即判而不等 keyup（按住 Ctrl 连按 Tab 再放开的老习惯会在按下瞬间就跳）。
+17. **提示条随档位翻档，长按由定时器补刷**：提示条里 Ctrl 那一格的文案改为变量——`QUICK_SWITCH_HINT_TAP_LABEL = "松开即跳"` / `QUICK_SWITCH_HINT_HOLD_LABEL = "再按确认"`，由 `syncQuickSwitchHintMode()` 依据「此刻松开会不会直接跳」决定（按着 Ctrl 且（已待命 或 未到阈值）→ 松开即跳；其余一律「再按确认」）。判据是**行为**而不是「按了多久」：待命态下再按住 Ctrl 时松开一定提交，所以只要按着就显示「松开即跳」，不会出现「写着再按确认、松手却跳了」的错标。长按不动时没有任何按键事件可依赖，翻档只能靠 `armQuickSwitchTapTimer()` 起的一次性 `setTimeout` 在跨过阈值的瞬间补刷；关灯、Ctrl 松开、卸载三处都必须 `clearQuickSwitchTapTimer()`，否则 2s 后会戳已经移出文档的 DOM。**被否**：只显示固定文案「再按确认」（tap 档下这句话是错的，用户会多按一次）、用 `requestAnimationFrame` 轮询时长（空转且与仓库的零轮询纪律冲突）。
+
 #### 被否方案及原因
 - 保留面板内的复选框 + 插件页两个入口：两处状态容易打架，且停用后面板内入口根本不可达。
 - 让停用只摘窗格、不还原中间列样式：宿主中央区会留一列空白，看起来像布局塌了。
@@ -40,10 +43,13 @@ C-109 落地的是「右栏停靠能力开关」（`dockEnabled`）：停用后�
 - 在 `ensurePane` 之后做停用收口：会先建一帧窗格再撤，肉眼可见闪动。
 - 停用时注销 tab 类型：见决策 8。
 - 快捷切换维持「松手即跳转」再加一个 Enter：松手误跳正是东家要消除的手感问题，留着等于没改。
+- 只保留「再次 Ctrl 确认」一档（即完全不看按住时长）：短按 Ctrl+Tab 是「点一下就走」的肌肉记忆，每次都强制补一下 Ctrl 反而拖慢；东家 2026-11-12 追加的正是要按时长分档。
+- 用 `Ctrl+Tab` 的 keydown 作时长基准：先按住 Ctrl 再按 Tab 的用法会被误判成快速点按，松手就跳。
+- 在 2s 到点时把这次输入「锁定」成 hold 档：多一个状态位，且用户提前松手时还要回查锁是否成立，不如在 keyup 时一次性结算。
 - 当前会话行也放进循环序列前段：首按 Tab 会停在「取消」项上，等于浪费一次按键。
 - 继续不放任何热键说明（沿用 C-108）：显式确认语义下「再按 Ctrl 提交」不可猜，用户会以为浮层卡住。
 - 用一行散文提示而非键位表：键帽 + 标签在 560px 宽的浮层里只需一行，扫读成本低于句子。
 - 提示条可点击或可关闭：它不承担操作，`pointer-events: none` 避免鼠标划过浮层底部时误命中。
 
 #### 影响面
-R-01-029（改名为「窗格总开关」，新增 AC-06 插件页卡片）、R-01-028/AC-02、AC-03、AC-04、AC-08、AC-10、AC-12（显式确认、当前行置顶、当前行工作区标签、底部常驻快捷键提示条）、`src/host.mjs` 的 `Config`（`paneEnabled` + 四项 `.description()`）、`src/client.mjs`（设置卡片、停用收口、`applyLayout(forceRelease)`、`placeToggle` 早退）、`src/quick-switch.mjs`（确认位、按键分派、分组顺序、当前行标签）。角标子系统（R-01-026）实现不变。e2e 规格 `right-dock-toggle` 原用例依赖「停用后仍在左列」，与新语义冲突，需重写。
+R-01-029（改名为「窗格总开关」，新增 AC-06 插件页卡片）、R-01-028/AC-02、AC-03、AC-04、AC-08、AC-10、AC-12（两档确认——短按松开即跳、长按再按确认；当前行置顶、当前行工作区标签、底部常驻快捷键提示条及其翻档）、`src/host.mjs` 的 `Config`（`paneEnabled` + 四项 `.description()`）、`src/client.mjs`（设置卡片、停用收口、`applyLayout(forceRelease)`、`placeToggle` 早退）、`src/quick-switch.mjs`（确认位、按键分派、分组顺序、当前行标签）。角标子系统（R-01-026）实现不变。e2e 规格 `right-dock-toggle` 原用例依赖「停用后仍在左列」，与新语义冲突，需重写。
