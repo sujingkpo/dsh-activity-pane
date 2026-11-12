@@ -3211,14 +3211,22 @@ body:not([data-ds-dark-theme]) .dap-qs-ws {
    深浅主题各自跟随，不需要另写 body:not([data-ds-dark-theme]) 分支。 */
 .dap-qs-here {
   flex: none;
+  box-sizing: border-box;
   padding: 0 7px;
   border-radius: 999px;
-  color: var(--dsw-alias-label-primary, #1f2328);
-  background: color-mix(in oklch, var(--dsw-alias-label-primary, #1f2328) 13%, transparent);
+  /* 用本插件自己的强调蓝（与运行态圆点、浮动开关同源），而不是宿主的强调色：
+     宿主未暴露 --dsw-*accent* 变量，取宿主色会让标签随主题漂移。 */
+  color: var(--dap-qs-here-color, #65a0ff);
+  background: color-mix(in oklch, var(--dap-qs-here-color, #65a0ff) 16%, transparent);
+  border: 1px solid color-mix(in oklch, var(--dap-qs-here-color, #65a0ff) 46%, transparent);
   font-size: 10.5px;
-  line-height: 14px;
+  line-height: 13px;
   font-weight: 500;
   white-space: nowrap;
+}
+/* 浅色主题：#65a0ff 在浅底上偏淡，换深一档的同一色相（白底对比度约 4.5:1）。 */
+body:not([data-ds-dark-theme]) .dap-qs-here {
+  --dap-qs-here-color: #2f7ae5;
 }
 .dap-qs-texts {
   display: flex;
@@ -3668,8 +3676,11 @@ function createQuickSwitch(deps) {
 			quickSwitchVeil.hidden = true;
 		}
 		paintQuickSwitchHighlight();
+		// 失焦收口只留两条：窗口 blur（切应用/最小化/宿主切走）+ 点浮层外（pointerdown）。
+		// 页面转隐藏（visibilitychange）与 blur 覆盖同一场景，且 keydown 首行的 hasFocus()
+		// 复核已兜住漏拍，故不再单独挂——东家 2026-11-12：多余的失焦监听移除。
 		window.addEventListener("blur", cancelQuickSwitch);
-		document.addEventListener("visibilitychange", onQuickSwitchVisibilityChange);
+		document.addEventListener("pointerdown", onQuickSwitchPointerDown, true);
 	}
 
 	/** 收起浮层：清高亮、摘窗口级监听，先跑退场过渡再落 hidden——切换本身有延时，
@@ -3682,7 +3693,7 @@ function createQuickSwitch(deps) {
 		quickSwitchConfirmArmed = false;
 		paintQuickSwitchHighlight();
 		window.removeEventListener("blur", cancelQuickSwitch);
-		document.removeEventListener("visibilitychange", onQuickSwitchVisibilityChange);
+		document.removeEventListener("pointerdown", onQuickSwitchPointerDown, true);
 		const menu = quickSwitchEl;
 		const veil = quickSwitchVeil;
 		if (menu === null || menu.hidden) return;
@@ -3711,10 +3722,19 @@ function createQuickSwitch(deps) {
 		closeQuickSwitch();
 	}
 
-	/** 页面转入隐藏（切标签页、最小化、宿主切走）时收起浮层：此刻用户看不见它，
-	 *  留着只会在回来时变成一个「已经在屏、但高亮停在旧位置」的残影。 */
-	function onQuickSwitchVisibilityChange() {
-		if (document.visibilityState === "hidden") cancelQuickSwitch();
+	/** 点浮层外任意区域即收起（东家 2026-11-12：「点击了其他区域也算失焦」）。
+	 *  用 pointerdown 而非 click：等 click 落地时宿主按钮的默认动作已经排上队了，
+	 *  我们要在那之前把浮层收掉。捕获期但**不** preventDefault / stopPropagation——
+	 *  用户点哪就点哪，浮层只是顺手收起，不能把这次点击吞掉。
+	 *  屏蔽：面板内部（含行点击，那条路径自己会提交）、轻遮罩（本功能不用它关闭）。 */
+	function onQuickSwitchPointerDown(event) {
+		if (!quickSwitchOpen) return;
+		const menu = quickSwitchEl;
+		if (menu === null) return;
+		const target = event.target;
+		if (target instanceof Node && menu.contains(target)) return;
+		if (target instanceof Node && quickSwitchVeil !== null && quickSwitchVeil.contains(target)) return;
+		cancelQuickSwitch();
 	}
 
 	/** 循环高亮：dir 为 +1 向后、-1 向前（Shift+Tab）。首按时落在第一项上；
@@ -3848,7 +3868,7 @@ function createQuickSwitch(deps) {
 		}
 		quickSwitchOpen = false;
 		window.removeEventListener("blur", cancelQuickSwitch);
-		document.removeEventListener("visibilitychange", onQuickSwitchVisibilityChange);
+		document.removeEventListener("pointerdown", onQuickSwitchPointerDown, true);
 		quickSwitchRowUnits.clear();
 		quickSwitchHeads.clear();
 		quickSwitchEl?.remove();

@@ -5630,15 +5630,15 @@ assert.ok(
 		quickSwitchSource.includes("line.append(here, ws, title);"),
 	"浮层含当前会话行作为取消出口；「当前」标签在标题行最前；选中自身只收起不跳转（R-01-028/AC-10）",
 );
-// 失焦语义（AC-04 的配套）：窗口没焦点时不接管任何热键，浮层若还在屏则当场收起；
-// 页面转隐藏（切标签/最小化）同样收起，避免回来看到一个停在旧位置的残影。
+// 失焦语义（AC-04 的配套）：窗口没焦点时不接管任何热键，浮层若还在屏则当场收起。
+// 收口只有两条通道——窗口 blur 与点浮层外（pointerdown）；visibilitychange 与 blur 覆盖
+// 同一场景、hasFocus() 复核已兜住漏拍，故不重复挂（东家 2026-11-12：多余监听移除）。
 assert.ok(
 	quickSwitchSource.includes("if (!document.hasFocus()) {") &&
-		quickSwitchSource.includes("function onQuickSwitchVisibilityChange()") &&
-		quickSwitchSource.includes('if (document.visibilityState === "hidden") cancelQuickSwitch();') &&
-		quickSwitchSource.includes('document.addEventListener("visibilitychange", onQuickSwitchVisibilityChange);') &&
-		quickSwitchSource.includes('document.removeEventListener("visibilitychange", onQuickSwitchVisibilityChange);'),
-	"窗口失焦期间不接管快捷键、页面隐藏即收起，监听成对挂挂摘（R-01-028/AC-04）",
+		quickSwitchSource.includes('window.addEventListener("blur", cancelQuickSwitch);') &&
+		quickSwitchSource.includes('window.removeEventListener("blur", cancelQuickSwitch);') &&
+		!quickSwitchSource.includes("onQuickSwitchVisibilityChange"),
+	"窗口失焦期间不接管快捷键、浮层收起；不保留重复的 visibilitychange 通道（R-01-028/AC-04）",
 );
 // 提示条（东家 2026-11-12 反馈：浮层里要能看到快捷键）：常驻底部、只读不拦指针，
 // 文案与按键分派同源（QUICK_SWITCH_HINTS 一张表），且不参与键盘循环序列。
@@ -5739,9 +5739,15 @@ assert.ok(
 		!clientSource.includes("function publishQuickSwitchCandidates"),
 	"切换器实现不外溢回 client.mjs（合并上游时实现段不参与冲突，C-108 后继）",
 );
+// 点外收起（东家 2026-11-12：点击其他区域也算失焦）：只挂 pointerdown、捕获期、且**不**
+// 拦截默认动作或冒泡——不能用 click，那会等宿主按钮的默认动作排上队才收浮层。
 assert.ok(
-	!bundle.includes('document.addEventListener("click"'),
-	"点外关闭不得在 document 上拦点击（R-01-028/AC-08）",
+	!bundle.includes('document.addEventListener("click"') &&
+		bundle.includes('document.addEventListener("pointerdown", onQuickSwitchPointerDown, true);') &&
+		bundle.includes('document.removeEventListener("pointerdown", onQuickSwitchPointerDown, true);') &&
+		bundle.includes("if (target instanceof Node && menu.contains(target)) return;") &&
+		bundle.includes("if (target instanceof Node && quickSwitchVeil !== null && quickSwitchVeil.contains(target)) return;"),
+	"点外收起只挂 pointerdown 且不拦默认动作，不接管 document 的 click（R-01-028/AC-08）",
 );
 
 
